@@ -52,6 +52,8 @@ jobs:
   publish_charts:
     name: Publish Helm charts to GitHub pages
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # We need the image to have been built (if required) and tagged before publishing charts
     needs: build_push_operator_image
     steps:
