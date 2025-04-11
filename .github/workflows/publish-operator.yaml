@@ -32,7 +32,7 @@ jobs:
         id: image-meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/stackhpc/kube-perftest-controller
+          images: ghcr.io/nscaledev/kube-perftest-controller
           # Produce the branch name or tag and the SHA as tags
           tags: |
             type=ref,event=branch

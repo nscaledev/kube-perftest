@@ -44,7 +44,7 @@ jobs:
         id: image-meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/stackhpc/kube-perftest-${{ matrix.component }}
+          images: ghcr.io/nscaledev/kube-perftest-${{ matrix.component }}
           # Produce the branch name or tag and the SHA as tags
           tags: |
             type=ref,event=branch

@@ -1,10 +1,11 @@
 # Configuration for the operator
 # For available options, see python/perftest/config.py
-config: {}
+config:
+  defaultImagePrefix: ghcr.io/nscaledev/kube-perftest-
 
 # The operator image to use
 image:
-  repository: ghcr.io/stackhpc/kube-perftest-controller
+  repository: ghcr.io/nscaledev/kube-perftest-controller
   pullPolicy: IfNotPresent
   tag: ""  # Defaults to appVersion
 
