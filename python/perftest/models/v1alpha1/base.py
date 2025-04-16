@@ -6,7 +6,8 @@ from pydantic import Field
 
 from kube_custom_resource import CustomResource, schema
 
-from ...template import Loader
+if t.TYPE_CHECKING:
+    from ...template import Loader
 
 
 class ImagePullPolicy(str, schema.Enum):
@@ -18,45 +19,39 @@ class ImagePullPolicy(str, schema.Enum):
     NEVER = "Never"
 
 
-class ContainerResources(schema.BaseModel):
+class PodCustomisation(schema.BaseModel):
     """
-    Model for specifying container resources.
+    Defines the available customisations for pods.
     """
-    requests: schema.Dict[str, schema.Any] = Field(
+    labels: schema.Dict[str, str] = Field(
         default_factory = dict,
-        description = "The resource requests for the pod."
+        description = "Labels to add to pods."
     )
-    limits: schema.Dict[str, schema.Any] = Field(
+    annotations: schema.Dict[str, str] = Field(
         default_factory = dict,
-        description = "The resource limits for the pod."
+        description = "The annotations for pods."
+    )
+    resources: schema.Dict[str, str] = Field(
+        default_factory = dict,
+        description = "Resources to apply to the pods."
+    )
+    node_selector: schema.Dict[str, str] = Field(
+        default_factory = dict,
+        description = "Node selector labels to apply to the pods."
+    )
+    tolerations: t.List[schema.Dict[str, schema.Any]] = Field(
+        default_factory = list,
+        description = "The tolerations to apply to the pods."
     )
 
 
-class BenchmarkSpec(schema.BaseModel):
+class BenchmarkSpec(PodCustomisation):
     """
-    Base class for benchmark specs. Mainly deals with networking.
+    Base class for benchmark specs.
     """
     host_network: bool = Field(
         False,
         description = "Indicates whether to use host networking or not."
-    )
-    network_name: schema.Optional[schema.constr(min_length = 1)] = Field(
-        None,
-        description = (
-            "The name of a Multus network over which to run the benchmark. "
-            "Only used when host networking is false."
-        )
-    )
-    resources: schema.Optional[ContainerResources] = Field(
-        None,
-        description = "The resources to use for benchmark containers."
-    )
-    mtu: schema.Optional[schema.conint(gt = 0)] = Field(
-        None,
-        description = (
-            "The MTU to use for the benchmark. "
-            "Leave empty for the default MTU."
-        )
     )
 
 
@@ -66,30 +61,22 @@ class BenchmarkPhase(str, schema.Enum):
     """
     # Indicates that the state of the benchmark is not known
     UNKNOWN = "Unknown"
-    # Indicates that the benchmark is being prepared
-    PREPARING = "Preparing"
     # Indicates that the benchmark is waiting to be scheduled
     PENDING = "Pending"
-    # Indicates that the benchmark has been aborted and is waiting for cleanup
-    ABORTING = "Aborting"
-    # Indicates that the benchmark has been aborted
-    ABORTED = "Aborted"
-    # Indicates that minimum requested number of pods for the benchmark are running
+    # Indicates that all the pods requested for the benchmark are running
     RUNNING = "Running"
-    # Indicates that the benchmark is waiting for pods to be recreated
-    RESTARTING = "Restarting"
-    # Indicates that the benchmark has completed successfully and is waiting for cleanup
-    COMPLETING = "Completing"
-    # Indicates that cleanup has succeeded for the benchmark and it is producing a result
+    # Indicates that the benchmark has completed and a summary result is being generated
     SUMMARISING = "Summarising"
     # Indicates that the benchmark has completed successfully
     COMPLETED = "Completed"
-    # Indicates that the benchmark finished unexpectedly and is waiting for cleanup
-    TERMINATING = "Terminating"
-    # Indicates that the benchmark finished unexpectedly, e.g. in response to an event
-    TERMINATED = "Terminated"
     # Indicates that the benchmark reached the maximum number of retries without completing
     FAILED = "Failed"
+
+    def is_terminal(self):
+        """
+        Indicates if the phase is a terminal phase.
+        """
+        return self in {self.COMPLETED, self.FAILED}
 
 
 class ResourceRef(schema.BaseModel):
@@ -169,6 +156,10 @@ class Benchmark(CustomResource, abstract = True):
     """
     Base class for benchmark resources.
     """
+    spec: BenchmarkSpec = Field(
+        ...,
+        description = "The specification of the benchmark."
+    )
     status: BenchmarkStatus = Field(
         default_factory = BenchmarkStatus,
         description = "The status of the benchmark."
@@ -180,26 +171,44 @@ class Benchmark(CustomResource, abstract = True):
         """
         return f"{self._meta.singular_name}.yaml.j2"
 
-    def get_resources(self, template_loader: Loader) -> t.Iterable[t.Dict[str, t.Any]]:
+    def get_resources(self, template_loader: 'Loader') -> t.Iterable[t.Dict[str, t.Any]]:
         """
         Returns the resources to create for this benchmark.
         """
-        # By default, this just renders a YAML template
         return template_loader.yaml_template_all(self.get_template(), benchmark = self)
 
-    def job_modified(self, job: t.Dict[str, t.Any]):
+    def jobset_modified(self, jobset: t.Dict[str, t.Any]):
         """
-        Update the status of this benchmark to reflect a modification to the Volcano job.
+        Update the status of this benchmark when the jobset for the benchmark is modified.
         """
-        # By default, update the benchmark phase to match the job
-        # The benchmark phase matches the Volcano job phase until it reaches "Completed"
-        # At that point, the benchmark goes into a Summarising phase, which triggers the
-        # calculation of the overall result
-        job_phase = job.get("status", {}).get("state", {}).get("phase", "Unknown")
-        if job_phase == "Completed":
-            self.status.phase = BenchmarkPhase.SUMMARISING
-        else:
-            self.status.phase = BenchmarkPhase(job_phase)
+        # If the benchmark is already in a terminal state, there is nothing to do
+        if self.status.phase.is_terminal():
+            return
+        # If the jobset has a terminal state, the benchmark should be in the corresponding state
+        terminal_state = jobset.get("status", {}).get("terminalState")
+        if terminal_state:
+            self.status.phase = (
+                # When the jobset completes, we trigger the summary phase
+                BenchmarkPhase.SUMMARISING
+                if terminal_state == "Completed"
+                else BenchmarkPhase.FAILED
+            )
+            return
+        # The only other phase transition we want to manage here is pending -> running
+        # So if we are not in the pending state, just stay in our current state
+        if self.status.phase != BenchmarkPhase.PENDING:
+            return
+        # We transition from pending to running the first time that all the replicated jobs
+        # have the expected number of replicas in the ready state
+        ready_replicas = {
+            rjs["name"]: rjs["ready"]
+            for rjs in jobset.get("status", {}).get("replicatedJobsStatus", [])
+        }
+        if all(
+            ready_replicas.get(rj["name"], 0) >= rj["replicas"]
+            for rj in jobset.get("spec", {}).get("replicatedJobs", [])
+        ):
+            self.status.phase = BenchmarkPhase.RUNNING
 
     async def pod_modified(
         self,
@@ -207,7 +216,7 @@ class Benchmark(CustomResource, abstract = True):
         fetch_pod_log: t.Callable[[], t.Awaitable[str]]
     ):
         """
-        Update the status of this benchmark to reflect a modification to one of its pods.
+        Update the status of this benchmark when a pod that is part of the benchmark is modified.
 
         Receives the pod instance and an async function that can be called to get the pod log.
         """

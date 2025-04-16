@@ -2,8 +2,8 @@
 # Dockerfile for the RDMA bandwidth and latency benchmarks
 #####
 
-FROM quay.io/rockylinux/rockylinux:9.5
+FROM ubuntu:jammy
 
-RUN yum install -y perftest && \
-    yum clean all -y && \
-    rm -rf /var/cache
+RUN apt-get update && \
+    apt-get install -y infiniband-diags perftest && \
+    rm -rf /var/lib/apt/lists/*

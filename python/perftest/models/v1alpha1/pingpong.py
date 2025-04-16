@@ -142,17 +142,6 @@ class MPIPingPong(
             "jsonPath": ".spec.hostNetwork",
         },
         {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
-        },
-        {
-            "name": "MTU",
-            "type": "integer",
-            "jsonPath": ".spec.mtu",
-            "priority": 1,
-        },
-        {
             "name": "Transport",
             "type": "string",
             "jsonPath": ".spec.transport",

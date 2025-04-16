@@ -99,17 +99,6 @@ class IPerf(
             "jsonPath": ".spec.hostNetwork",
         },
         {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
-        },
-        {
-            "name": "MTU",
-            "type": "integer",
-            "jsonPath": ".spec.mtu",
-            "priority": 1,
-        },
-        {
             "name": "Duration",
             "type": "integer",
             "jsonPath": ".spec.duration",

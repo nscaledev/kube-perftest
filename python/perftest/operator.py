@@ -1,9 +1,10 @@
 import asyncio
 import datetime
 import functools
-import itertools
 import logging
 import math
+import random
+import string
 import sys
 
 import kopf
@@ -63,27 +64,43 @@ async def on_startup(**kwargs):
     """
     Apply kopf settings and register CRDs.
     """
-    try:
-        kopf_settings = kwargs["settings"]
-        kopf_settings.persistence.finalizer = f"{settings.api_group}/finalizer"
-        kopf_settings.persistence.progress_storage = kopf.AnnotationsProgressStorage(
-            prefix = settings.api_group
-        )
-        kopf_settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage(
-            prefix = settings.api_group,
-            key = "last-handled-configuration",
-        )
-        # This has to be initialised inside the event loop
-        global PRIORITY_LOCK
-        PRIORITY_LOCK = asyncio.Lock()
-        # Install the CRDs for the models in the registry
-        for crd in REGISTRY:
+    kopf_settings = kwargs["settings"]
+    kopf_settings.persistence.finalizer = f"{settings.api_group}/finalizer"
+    kopf_settings.persistence.progress_storage = kopf.AnnotationsProgressStorage(
+        prefix = settings.api_group
+    )
+    kopf_settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage(
+        prefix = settings.api_group,
+        key = "last-handled-configuration",
+    )
+    # This has to be initialised inside the event loop
+    global PRIORITY_LOCK
+    PRIORITY_LOCK = asyncio.Lock()
+    # Install the CRDs for the models in the registry
+    for crd in REGISTRY:
+        try:
             # We include default values in the CRDs, as freezing defaults at create
             # time is appropriate for our use case
-            await EK_CLIENT.apply_object(crd.kubernetes_resource(include_defaults = True))
-    except Exception:
-        logger.exception("error during initialisation - exiting")
-        sys.exit(1)
+            await EK_CLIENT.apply_object(crd.kubernetes_resource(), force = True)
+        except Exception:
+            logger.exception("error applying CRD %s.%s - exiting", crd.plural_name, crd.api_group)
+            sys.exit(1)
+    # Give Kubernetes a chance to create the APIs for the CRDs
+    await asyncio.sleep(0.5)
+    # Check to see if the APIs for the CRDs are up
+    # If they are not, the kopf watches will not start properly so we exit and get restarted
+    for crd in REGISTRY:
+        preferred_version = next(k for k, v in crd.versions.items() if v.storage)
+        api_version = f"{crd.api_group}/{preferred_version}"
+        try:
+            await EK_CLIENT.get(f"/apis/{api_version}/{crd.plural_name}")
+        except Exception:
+            logger.exception(
+                "api for %s.%s not available - exiting",
+                crd.plural_name,
+                crd.api_group
+            )
+            sys.exit(1)
     
 
 @kopf.on.cleanup()
@@ -128,7 +145,7 @@ async def save_benchmark_status(benchmark):
             benchmark.metadata.name,
             {
                 "metadata": { "resourceVersion": benchmark.metadata.resource_version },
-                "status": benchmark.status.dict(exclude_defaults = True),
+                "status": benchmark.status.model_dump(exclude_defaults = True),
             },
             namespace = benchmark.metadata.namespace
         )
@@ -148,7 +165,7 @@ async def handle_benchmark_created(benchmark, **kwargs):
     """
     # Acknowledge that we are aware of the benchmark at the earliest possible opportunity
     if benchmark.status.phase == api.BenchmarkPhase.UNKNOWN:
-        benchmark.status.phase = api.BenchmarkPhase.PREPARING
+        benchmark.status.phase = api.BenchmarkPhase.PENDING
         benchmark = await save_benchmark_status(benchmark)
     # Find the priority class to use for the benchmark
     # If we have not already created one, then create one
@@ -193,13 +210,13 @@ async def handle_benchmark_created(benchmark, **kwargs):
     for resource in benchmark.get_resources(TEMPLATE_LOADER):
         # Make sure to adopt the resources so that they get removed with the benchmark
         metadata = resource.setdefault("metadata", {})
-        metadata["labels"].update({
+        metadata.setdefault("labels", {}).update({
             settings.kind_label: benchmark.kind,
             settings.namespace_label: benchmark.metadata.namespace,
             settings.name_label: benchmark.metadata.name,
         })
         metadata["namespace"] = benchmark.metadata.namespace
-        metadata["ownerReferences"] = [
+        metadata.setdefault("ownerReferences", []).append(
             {
                 "apiVersion": benchmark.api_version,
                 "kind": benchmark.kind,
@@ -207,9 +224,9 @@ async def handle_benchmark_created(benchmark, **kwargs):
                 "uid": benchmark.metadata.uid,
                 "blockOwnerDeletion": True,
                 "controller": True,
-            },
-        ]
-        applied = await EK_CLIENT.apply_object(resource)
+            }
+        )
+        applied = await EK_CLIENT.apply_object(resource, force = True)
         # Store a reference to the resource so it can be deleted later
         benchmark.status.managed_resources.append(
             api.ResourceRef(
@@ -219,7 +236,7 @@ async def handle_benchmark_created(benchmark, **kwargs):
             )
         )
     # Save the resource refs
-    _ = await save_benchmark_status(benchmark)
+    await save_benchmark_status(benchmark)
 
 
 @benchmark_handler(kopf.on.update, field = "status.phase")
@@ -229,14 +246,12 @@ async def handle_benchmark_status_changed(benchmark, **kwargs):
     """
     # If the benchmark is transitioning to a finished state, set the finished time
     if benchmark.status.phase in {
-        api.BenchmarkPhase.ABORTED,
         api.BenchmarkPhase.COMPLETED,
-        api.BenchmarkPhase.TERMINATED,
-        api.BenchmarkPhase.FAILED,
+        api.BenchmarkPhase.FAILED
     }:
         if not benchmark.status.finished_at:
             benchmark.status.finished_at = datetime.datetime.now()
-            _ = await save_benchmark_status(benchmark)
+            await save_benchmark_status(benchmark)
         # If the benchmark has an owning set, register the completion with it
         ref = next(
             (
@@ -252,7 +267,7 @@ async def handle_benchmark_status_changed(benchmark, **kwargs):
         if ref:
             resource = await EK_CLIENT.api(ref.api_version).resource(ref.kind)
             try:
-                benchmark_set = api.BenchmarkSet.parse_obj(
+                benchmark_set = api.BenchmarkSet.model_validate(
                     await resource.fetch(
                         ref.name,
                         namespace = benchmark.metadata.namespace
@@ -260,14 +275,14 @@ async def handle_benchmark_status_changed(benchmark, **kwargs):
                 )
                 succeeded = benchmark.status.phase == api.BenchmarkPhase.COMPLETED
                 benchmark_set.status.completed[benchmark.metadata.name] = succeeded
-                _ = await save_benchmark_status(benchmark_set)
+                await save_benchmark_status(benchmark_set)
             except ApiError as exc:
                 if exc.status_code != 404:
                     raise
     elif benchmark.status.phase == api.BenchmarkPhase.RUNNING:
         if not benchmark.status.started_at:
             benchmark.status.started_at = datetime.datetime.now()
-            _ = await save_benchmark_status(benchmark)
+            await save_benchmark_status(benchmark)
     elif benchmark.status.phase == api.BenchmarkPhase.SUMMARISING:
         # Allow the benchmark to summarise itself and save
         try:
@@ -284,11 +299,11 @@ async def handle_benchmark_status_changed(benchmark, **kwargs):
             await resource.delete(ref.name, namespace = benchmark.metadata.namespace)
         # Make sure to delete the priority class
         resource = await EK_CLIENT.api("scheduling.k8s.io/v1").resource("priorityclasses")
-        _ = await resource.delete(benchmark.status.priority_class_name)
+        await resource.delete(benchmark.status.priority_class_name)
         # Once the resources are deleted, we can mark the benchmark as completed
         benchmark.status.phase = api.BenchmarkPhase.COMPLETED
         benchmark.status.managed_resources = []
-        _ = await save_benchmark_status(benchmark)
+        await save_benchmark_status(benchmark)
 
 
 @benchmark_handler(kopf.on.delete)
@@ -315,54 +330,74 @@ def on_benchmark_resource_event(*args, **kwargs):
             # Implement retries for kopf temporary errors
             # kopf does not provide this for event handlers normally, but it is important
             # to deal with conflicts when applying updates to benchmark state
-            while True:
-                ekapi = await EK_CLIENT.api_preferred_version(settings.api_group)
-                resource = await ekapi.resource(handler_kwargs["labels"][settings.kind_label])
-                try:
-                    benchmark = REGISTRY.get_model_instance(
-                        await resource.fetch(
-                            handler_kwargs["labels"][settings.name_label],
-                            namespace = handler_kwargs["labels"][settings.namespace_label]
-                        )
+            # To do this, we annotate the resource with a random value to trigger a retry
+            ekapi = await EK_CLIENT.api_preferred_version(settings.api_group)
+            resource = await ekapi.resource(handler_kwargs["labels"][settings.kind_label])
+            try:
+                benchmark = REGISTRY.get_model_instance(
+                    await resource.fetch(
+                        handler_kwargs["labels"][settings.name_label],
+                        namespace = handler_kwargs["labels"][settings.namespace_label]
                     )
-                    return await func(benchmark = benchmark, **handler_kwargs)
+                )
+                return await func(benchmark = benchmark, **handler_kwargs)
+            except ApiError as exc:
+                if exc.status_code == 404:
+                    return
+                else:
+                    raise
+            except kopf.TemporaryError as exc:
+                logger.warning(f"{exc} - retrying")
+                try:
+                    await EK_CLIENT.patch_object(
+                        handler_kwargs["body"],
+                        {
+                            "metadata": {
+                                "annotations": {
+                                    f"{settings.api_group}/force-retry": "".join(
+                                        random.choices(
+                                            string.ascii_lowercase + string.digits,
+                                            k = 8
+                                        )
+                                    ),
+                                },
+                            },
+                        }
+                    )
                 except ApiError as exc:
                     if exc.status_code == 404:
                         return
                     else:
                         raise
-                except kopf.TemporaryError as exc:
-                    # On kopf temporary errors, go round the loop again after yielding control
-                    await asyncio.sleep(exc.delay)
         kwargs.setdefault("labels", {}).update({ settings.kind_label: kopf.PRESENT })
         return kopf.on.event(*args, **kwargs)(handler)
     return decorator
 
 
-@on_benchmark_resource_event("batch.volcano.sh", "job")
-async def handle_job_event(benchmark, body, **kwargs):
+@on_benchmark_resource_event("jobset.x-k8s.io", "jobset")
+async def handle_jobset_event(benchmark, body, **kwargs):
     """
-    Executes whenever an event occurs for a Volcano job that is part of a benchmark.
+    Executes whenever an event occurs for a jobset that is part of a benchmark.
     """
     if type == "DELETED":
         return
-    # If the benchmark is completed, there is nothing to do
-    if benchmark.status.phase == api.BenchmarkPhase.COMPLETED:
+    # If the benchmark is already in a terminal phase, there is nothing to do
+    if benchmark.status.phase.is_terminal():
         return
     # Allow the benchmark to update it's status based on the job
-    benchmark.job_modified(body)
-    _ = await save_benchmark_status(benchmark)
+    benchmark.jobset_modified(body)
+    await save_benchmark_status(benchmark)
 
 
 @on_benchmark_resource_event("pod")
-async def handle_pod_event(type, benchmark, body, name, namespace, status, **kwargs):
+async def handle_pod_event(type, benchmark, body, name, namespace, **kwargs):
     """
     Executes whenever an event occurs for a pod that is part of a benchmark.
     """
     if type == "DELETED":
         return
-    # If the benchmark is completed, there is nothing to do
-    if benchmark.status.phase == api.BenchmarkPhase.COMPLETED:
+    # If the benchmark is already in a terminal phase, there is nothing to do
+    if benchmark.status.phase.is_terminal():
         return
     # Allow the benchmark to make a status update based on the pod
     # We pass a callback that allows the benchmark to access the pod log if required
@@ -370,106 +405,7 @@ async def handle_pod_event(type, benchmark, body, name, namespace, status, **kwa
         resource = await EK_CLIENT.api("v1").resource("pods/log")
         return await resource.fetch(name, namespace = namespace)
     await benchmark.pod_modified(body, fetch_pod_log)
-    _ = await save_benchmark_status(benchmark)
-
-
-@on_benchmark_resource_event("configmaps", labels = { settings.hosts_from_label: kopf.PRESENT })
-async def handle_discovery_configmap_event(type, benchmark, body, name, namespace, **kwargs):
-    """
-    Executes whenever an event occurs for a discovery configmap.
-    """
-    if type == "DELETED":
-        return
-    # If the benchmark is completed, there is nothing to do
-    if benchmark.status.phase == api.BenchmarkPhase.COMPLETED:
-        return
-    # If the hosts are not available yet, there is nothing to do
-    if not body["data"].get("hosts"):
-        return
-    # If the hosts are available, annotate all the pods in the benchmark
-    resource = await EK_CLIENT.api("v1").resource("pods")
-    labels = {
-        settings.kind_label: benchmark.kind,
-        settings.namespace_label: benchmark.metadata.namespace,
-        settings.name_label: benchmark.metadata.name,
-    }
-    async for pod in resource.list(labels = labels):
-        _ = await resource.patch(
-            pod.metadata.name,
-            {
-                "metadata": {
-                    "annotations": {
-                        settings.hosts_available_annotation: "yes",
-                    },
-                },
-            },
-            namespace = pod.metadata.namespace
-        )
-
-
-@on_benchmark_resource_event("endpoints")
-async def handle_endpoints_event(type, benchmark, body, name, namespace, **kwargs):
-    """
-    Executes whenever an event occurs for an endpoints resource that is part of a benchmark.
-    """
-    # If the benchmark is completed, there is nothing to do
-    if benchmark.status.phase == api.BenchmarkPhase.COMPLETED:
-        return
-    # Next, see if there is a configmap that is tracking the hosts
-    resource = await EK_CLIENT.api("v1").resource("configmaps")
-    configmap = await resource.first(
-        labels = {
-            settings.kind_label: benchmark.kind,
-            settings.namespace_label: benchmark.metadata.namespace,
-            settings.name_label: benchmark.metadata.name,
-            settings.hosts_from_label: PRESENT
-        },
-        namespace = namespace
-    )
-    if not configmap:
-        return
-    # Get the list of expected pod names from the configmap
-    expected = { l.strip() for l in configmap.data.get("all-hosts", "").splitlines() }
-    # Collect up the IPs from the endpoints
-    # We include addresses and not-ready addresses as we use an init container
-    # to wait for the hosts to be ready which stops the pod moving into addresses
-    ips = {}
-    if type != "DELETED":
-        for subset in body.get("subsets", []):
-            addresses = itertools.chain(
-                subset.get("addresses", []),
-                subset.get("notReadyAddresses", [])
-            )
-            for address in addresses:
-                # If the hostname is present, use it
-                # If not, use the pod name from the targetRef
-                if "hostname" in address:
-                    hostname = address["hostname"]
-                else:
-                    target_ref = address.get("targetRef")
-                    if target_ref and target_ref["kind"] == "Pod":
-                        hostname = target_ref["name"]
-                    else:
-                        continue
-                ips[f"{hostname}.{name}"] = f"{address['ip']}  {hostname}.{name}  {hostname}"
-    _ = await resource.patch(
-        configmap.metadata.name,
-        {
-            "metadata": {
-                "resourceVersion": configmap.metadata["resourceVersion"],
-            },
-            "data": {
-                # If we have an IP for each pod, write the hosts file
-                # If not, write an empty hosts file
-                "hosts": (
-                    "\n".join([settings.default_hosts] + list(ips.values()))
-                    if not expected.difference(ips.keys())
-                    else ""
-                ),
-            },
-        },
-        namespace = configmap.metadata.namespace
-    )
+    await save_benchmark_status(benchmark)
 
 
 @kopf.on.create(settings.api_group, api.BenchmarkSet._meta.kind)
@@ -477,7 +413,7 @@ async def handle_benchmark_set_created(body, **kwargs):
     """
     Executed whenever a benchmark set is created.
     """
-    benchmark_set = api.BenchmarkSet.parse_obj(body)
+    benchmark_set = api.BenchmarkSet.model_validate(body)
     # Update the count before we create anything
     # We can calculate this without producing any permutations
     benchmark_set.status.permutation_count = benchmark_set.spec.permutations.get_count()
@@ -516,7 +452,7 @@ async def handle_benchmark_set_created(body, **kwargs):
                 },
                 "spec": utils.mergeconcat(benchmark_set.spec.template.spec, permutation)
             }
-            _ = await EK_CLIENT.apply_object(resource)
+            await EK_CLIENT.apply_object(resource, force = True)
             idx = idx + 1
 
 
@@ -525,7 +461,7 @@ async def handle_benchmark_set_completed(body, **kwargs):
     """
     Executed whenever a completed benchmark is registered for a benchmark set.
     """
-    benchmark_set = api.BenchmarkSet.parse_obj(body)
+    benchmark_set = api.BenchmarkSet.model_validate(body)
     succeeded = failed = 0
     for completed in benchmark_set.status.completed.values():
         if completed:
@@ -536,4 +472,4 @@ async def handle_benchmark_set_completed(body, **kwargs):
     benchmark_set.status.failed = failed
     if (succeeded + failed) == benchmark_set.status.count:
         benchmark_set.status.finished_at = datetime.datetime.now()
-    _ = await save_benchmark_status(benchmark_set)
+    await save_benchmark_status(benchmark_set)

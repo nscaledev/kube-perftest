@@ -44,10 +44,10 @@ class Configuration(BaseConfiguration):
     easykube_field_manager: constr(min_length = 1) = "kube-perftest-operator"
 
     #: The default image prefix to use for benchmark images
-    default_image_prefix: constr(min_length = 1) = "ghcr.io/stackhpc/kube-perftest-"
+    default_image_prefix: constr(min_length = 1) = "ghcr.io/nscaledev/kube-perftest-"
     #: The default tag to use for benchmark images
     #: The chart will set this to the tag that matches the operator image
-    default_image_tag: constr(min_length = 1) = "latest"
+    default_image_tag: constr(min_length = 1) = "dev"
     #: The image pull policy to use for benchmarks
     default_image_pull_policy: ImagePullPolicy = ImagePullPolicy.IF_NOT_PRESENT
     #: The default image to use for discovery init containers

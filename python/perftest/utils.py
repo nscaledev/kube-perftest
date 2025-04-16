@@ -2,8 +2,10 @@ import functools
 import math
 import re
 import typing as t
+
 from kube_custom_resource import schema
 from pydantic import Field, confloat
+
 from .errors import PodLogFormatError
 
 

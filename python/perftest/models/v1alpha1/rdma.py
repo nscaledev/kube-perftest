@@ -69,6 +69,10 @@ class RDMASpec(base.BenchmarkSpec):
         RDMAMode.READ,
         description = "The mode for the test."
     )
+    connection_manager: bool = Field(
+        False,
+        description = "Indicates whether to use the RDMA connection manager."
+    )
     iterations: schema.conint(ge = 5) = Field(
         1000,
         description = "The number of iterations for each message size."
@@ -76,6 +80,14 @@ class RDMASpec(base.BenchmarkSpec):
     extra_args: t.List[schema.constr(min_length = 1)] = Field(
         default_factory = list,
         description = "Extra arguments for the command."
+    )
+    server: base.PodCustomisation = Field(
+        default_factory = base.PodCustomisation,
+        description = "Pod customisations for the server pod."
+    )
+    client: base.PodCustomisation = Field(
+        default_factory = base.PodCustomisation,
+        description = "Pod customisations for the client pod."
     )
 
 
@@ -198,17 +210,6 @@ class RDMABandwidth(
             "name": "Host Network",
             "type": "boolean",
             "jsonPath": ".spec.hostNetwork",
-        },
-        {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
-        },
-        {
-            "name": "MTU",
-            "type": "integer",
-            "jsonPath": ".spec.mtu",
-            "priority": 1,
         },
         {
             "name": "Mode",
@@ -370,11 +371,6 @@ class RDMALatency(
             "name": "Host Network",
             "type": "boolean",
             "jsonPath": ".spec.hostNetwork",
-        },
-        {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
         },
         {
             "name": "MTU",
