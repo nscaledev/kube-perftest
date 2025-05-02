@@ -3,7 +3,7 @@ entries:
   kube-perftest-operator:
   - apiVersion: v2
     appVersion: 49f4680
-    created: "2025-04-16T14:42:14.044802442Z"
+    created: "2025-05-02T09:46:52.36380307Z"
     description: Helm chart for deploying the perftest operator.
     digest: de6cbe6d8da63297ab31a6e9c6c57604db10e9bd1db29805ead550c8c80d3d77
     name: kube-perftest-operator
@@ -12,8 +12,18 @@ entries:
     - kube-perftest-operator-0.1.0-dev.0.main.187.tgz
     version: 0.1.0-dev.0.main.187
   - apiVersion: v2
+    appVersion: ab203d9
+    created: "2025-05-02T09:46:52.363545339Z"
+    description: Helm chart for deploying the perftest operator.
+    digest: e20c29ac5325a4d454106414f60b06dc6affc5e0ad68373781471fd08cf7aaf5
+    name: kube-perftest-operator
+    type: application
+    urls:
+    - kube-perftest-operator-0.1.0-dev.0.feat-jobset.189.tgz
+    version: 0.1.0-dev.0.feat-jobset.189
+  - apiVersion: v2
     appVersion: daeacac
-    created: "2025-04-16T14:42:14.044525574Z"
+    created: "2025-05-02T09:46:52.363251701Z"
     description: Helm chart for deploying the perftest operator.
     digest: 35895b78be5bd13959367c1bf02c7e0bbf2ef13eda0f8ff3e2bb51f0b26fe2cb
     name: kube-perftest-operator
@@ -21,4 +31,4 @@ entries:
     urls:
     - kube-perftest-operator-0.1.0-dev.0.feat-jobset.188.tgz
     version: 0.1.0-dev.0.feat-jobset.188
-generated: "2025-04-16T14:42:14.043649836Z"
+generated: "2025-05-02T09:46:52.36283868Z"
