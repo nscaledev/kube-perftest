@@ -27,10 +27,14 @@ spec:
                   image: {{ benchmark.spec.image }}
                   imagePullPolicy: {{ benchmark.spec.image_pull_policy }}
                   {{ macros.container_defaults(benchmark, benchmark.spec.server) | indent(20) }}
-                  {%- if benchmark.spec.host_network %}
                   securityContext:
+                    {%- if benchmark.spec.host_network %}
                     privileged: true
-                  {%- endif %}
+                    {%- else %}
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                    {%- endif %}
                   args:
                     - ib_{{ benchmark.spec.mode }}_bw
                     - -a
@@ -68,10 +72,14 @@ spec:
                   image: {{ benchmark.spec.image }}
                   imagePullPolicy: {{ benchmark.spec.image_pull_policy }}
                   {{ macros.container_defaults(benchmark, benchmark.spec.client) | indent(20) }}
-                  {%- if benchmark.spec.host_network %}
                   securityContext:
+                    {%- if benchmark.spec.host_network %}
                     privileged: true
-                  {%- endif %}
+                    {%- else %}
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                    {%- endif %}
                   args:
                     - ib_{{ benchmark.spec.mode }}_bw
                     - -a

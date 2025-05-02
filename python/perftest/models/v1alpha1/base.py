@@ -31,7 +31,7 @@ class PodCustomisation(schema.BaseModel):
         default_factory = dict,
         description = "The annotations for pods."
     )
-    resources: schema.Dict[str, str] = Field(
+    resources: schema.Dict[str, schema.Any] = Field(
         default_factory = dict,
         description = "Resources to apply to the pods."
     )
