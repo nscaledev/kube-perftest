@@ -21,14 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - component: discovery
-          - component: fio
-          - component: iperf
-          - component: mpi-benchmarks
-          - component: openfoam
           - component: perftest
-          # TODO - need to fix this build
-          # - component: pytorch-benchmarks
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
