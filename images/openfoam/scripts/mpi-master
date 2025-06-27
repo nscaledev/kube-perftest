@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-
-# Set openfoam environment
-source /opt/openfoam10/etc/bashrc
-
-exec /usr/bin/time -p mpirun "$@"

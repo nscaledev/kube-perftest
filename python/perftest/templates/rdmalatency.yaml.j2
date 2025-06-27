@@ -49,13 +49,11 @@ spec:
                         CPULIST="$(cat /sys/class/infiniband/{{ benchmark.spec.server.device }}/device/local_cpulist)"
                         {%- endif %}
                         exec taskset -c "$CPULIST" \
-                          ib_{{ benchmark.spec.mode }}_bw \
+                          ib_{{ benchmark.spec.mode }}_lat \
                             -F \
                             {%- if benchmark.spec.connection_manager %}
                             -R \
                             {%- endif %}
-                            --report_gbits \
-                            -q {{ benchmark.spec.qps }} \
                             -s {{ benchmark.spec.message_size }} \
                             -D {{ benchmark.spec.duration }} \
                             -d {{ benchmark.spec.server.device }}
@@ -100,14 +98,12 @@ spec:
                         CPULIST="$(cat /sys/class/infiniband/{{ benchmark.spec.client.device }}/device/local_cpulist)"
                         {%- endif %}
                         exec taskset -c "$CPULIST" \
-                          ib_{{ benchmark.spec.mode }}_bw \
+                          ib_{{ benchmark.spec.mode }}_lat \
                             -F \
                             {%- if benchmark.spec.connection_manager %}
                             -R \
                             {%- endif %}
-                            --report_gbits \
-                            -q {{ benchmark.spec.qps }} \
                             -s {{ benchmark.spec.message_size }} \
                             -D {{ benchmark.spec.duration }} \
-                            -d {{ benchmark.spec.client.device }} \
+                            -d {{ benchmark.spec.server.device }} \
                             {{ macros.full_name(benchmark) }}-server-0-0.{{ macros.full_name(benchmark) }}

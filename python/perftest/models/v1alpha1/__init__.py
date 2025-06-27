@@ -1,4 +1,3 @@
 from .base import *
-from .iperf import *
-from .pingpong import *
+from .rdma import *
 from .set import *

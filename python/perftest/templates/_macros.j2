@@ -1,70 +1,113 @@
-{% macro default_labels(benchmark, component_name = None) -%}
+{% macro full_name(benchmark) -%}
+{{- benchmark.kind | lower -}}-{{- benchmark.metadata.name -}}
+{%- endmacro %}
+
+
+{% macro default_labels(benchmark, component = None) -%}
 {{ settings.kind_label }}: {{ benchmark.kind }}
 {{ settings.namespace_label }}: {{ benchmark.metadata.namespace }}
 {{ settings.name_label }}: {{ benchmark.metadata.name }}
-{%- if component_name %}
-{{ settings.component_label }}: {{ component_name }}
+{%- if component %}
+{{ settings.component_label }}: {{ component }}
 {%- endif %}
 {%- endmacro %}
 
-{% macro labels(benchmark, component_name = None, component_overrides = None) -%}
+
+{% macro labels(benchmark, component = None, extra = None, extra2 = None) -%}
 {{-
-  benchmark.spec.labels |
-    mergeconcat(component_overrides.labels | default({})) |
-    mergeconcat(default_labels(benchmark, component_name) | fromyaml) |
+  benchmark.spec.default_metadata.labels |
+    mergeconcat(extra.labels | default({})) |
+    mergeconcat(extra2.labels | default({})) |
+    mergeconcat(default_labels(benchmark, component) | fromyaml) |
     toyaml
 }}
 {%- endmacro %}
 
-{% macro metadata(benchmark, component_name = None, component_overrides = None) -%}
-labels:
-  {{ labels(benchmark, component_name, component_overrides) | indent(2) }}
-annotations:
-  {{
-    benchmark.spec.annotations |
-      mergeconcat(component_overrides.annotations | default({})) |
-      toyaml |
-      indent(2)
-  }}
+
+{% macro annotations(benchmark, extra = None, extra2 = None) -%}
+{{-
+  benchmark.spec.default_metadata.annotations |
+    mergeconcat(extra.annotations | default({})) |
+    mergeconcat(extra2.annotations | default({})) |
+    toyaml
+}}
 {%- endmacro %}
 
-{% macro container_defaults(benchmark, component_overrides = None) -%}
+
+{% macro metadata(benchmark, component = None, extra = None, extra2 = None) -%}
+labels:
+  {{ labels(benchmark, component, extra, extra2) | indent(2) }}
+annotations:
+  {{ annotations(benchmark, extra, extra2) | indent(2) }}
+{%- endmacro %}
+
+
+{% macro pod_metadata(benchmark, component = None, extra = None, collect_logs = False) -%}
+{{-
+  metadata(benchmark, component, benchmark.spec.pods, extra) |
+    fromyaml |
+    mergeconcat(
+      {
+        "labels": {
+          settings.log_collection_label: "true",
+        },
+      }
+      if collect_logs
+      else {}
+    ) |
+    toyaml
+-}}
+{%- endmacro %}
+
+
+{% macro container_defaults(benchmark, extra = None) -%}
+image: {{ benchmark.spec.image }}
+imagePullPolicy: {{ benchmark.spec.image_pull_policy.value }}
 resources:
   {{
-    benchmark.spec.resources |
-      mergeconcat(component_overrides.resources | default({})) |
+    benchmark.spec.pods.resources |
+      mergeconcat(extra.resources | default({})) |
       toyaml |
       indent(2)
   }}
 {%- endmacro %}
 
-{% macro pod_defaults(benchmark, component_overrides = None) -%}
-priorityClassName: {{ benchmark.status.priority_class_name }}
+
+{% macro pod_defaults(benchmark, extra = None) -%}
 {%- if benchmark.spec.host_network %}
 hostNetwork: true
 dnsPolicy: ClusterFirstWithHostNet
 {%- endif %}
 nodeSelector:
   {{
-    benchmark.spec.node_selector |
-      mergeconcat(component_overrides.node_selector | default({})) |
+    benchmark.spec.pods.node_selector |
+      mergeconcat(extra.node_selector | default({})) |
       toyaml |
       indent(2)
   }}
 tolerations:
   {{
-    benchmark.spec.tolerations |
-      mergeconcat(component_overrides.tolerations | default([])) |
+    benchmark.spec.pods.tolerations |
+      mergeconcat(extra.tolerations | default([])) |
       toyaml |
       indent(2)
   }}
 {%- endmacro %}
 
-{% macro job_defaults(benchmark, component_overrides = None) -%}
+
+{% macro job_defaults(benchmark) -%}
 {%- endmacro %}
 
-{% macro distribution_exclusive(benchmark) -%}
+
+{% macro distribution_exclusive(benchmark, extra = None) -%}
 affinity:
+  nodeAffinity:
+    {{
+      benchmark.spec.pods.node_affinity |
+        mergeconcat(extra.node_affinity | default({})) |
+        toyaml |
+        indent(4)
+    }}
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
@@ -74,8 +117,16 @@ affinity:
         topologyKey: "kubernetes.io/hostname"
 {%- endmacro %}
 
-{% macro distribution_spread(benchmark, component = None) -%}
+
+{% macro distribution_spread(benchmark, component = None, extra = None) -%}
 affinity:
+  nodeAffinity:
+    {{
+      benchmark.spec.pods.node_affinity |
+        mergeconcat(extra.node_affinity | default({})) |
+        toyaml |
+        indent(4)
+    }}
   # Avoid pods from other jobs
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -118,11 +169,12 @@ topologySpreadConstraints:
     nodeTaintsPolicy: Honor
 {%- endmacro %}
 
+
 {% macro ssh_configmap(benchmark) -%}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ benchmark.metadata.name }}-ssh-config
+  name: {{ macros.full_name(benchmark) }}-ssh-config
   labels:
     {{ labels(benchmark) | indent(4) }}
 data:
@@ -130,11 +182,13 @@ data:
     Port {{ benchmark.spec.ssh_port }}
 {%- endmacro %}
 
+
 {% macro ssh_volume(benchmark) -%}
 name: ssh-config
 configMap:
-  name: {{ benchmark.metadata.name }}-ssh-config
+  name: {{ macros.full_name(benchmark) }}-ssh-config
 {%- endmacro %}
+
 
 {% macro ssh_volume_mount(benchmark) -%}
 name: ssh-config
