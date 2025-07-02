@@ -43,7 +43,7 @@ class Configuration(BaseConfiguration):
     #: The chart will set this to the tag that matches the operator image
     default_image_tag: constr(min_length = 1) = "dev"
     #: The image pull policy to use for benchmarks
-    default_image_pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
+    default_image_pull_policy: ImagePullPolicy = ImagePullPolicy.IF_NOT_PRESENT
 
     #: Label specifying the kind of the benchmark that a resource belongs to
     kind_label: constr(min_length = 1) = "perftest.nscale.com/benchmark-kind"

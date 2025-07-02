@@ -1,0 +1,68 @@
+{% import '_macros.j2' as macros %}
+
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ macros.full_name(benchmark) }}
+  {{ macros.metadata(benchmark, extra = benchmark.spec.job_set) | indent(2) }}
+spec:
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          {{ macros.metadata(benchmark, "server") | indent(10) }}
+        spec:
+          {{ macros.job_defaults(benchmark) | indent(10) }}
+          parallelism: 1
+          completions: 1
+          template:
+            metadata:
+              {{ macros.pod_metadata(benchmark, "server", benchmark.spec.server) | indent(14) }}
+            spec:
+              {{ macros.pod_defaults(benchmark, benchmark.spec.server) | indent(14) }}
+              {{ macros.distribution_exclusive(benchmark, benchmark.spec.server) | indent(14) }}
+              containers:
+                - name: server
+                  {{ macros.container_defaults(benchmark, benchmark.spec.server) | indent(18) }}
+                  args:
+                    - iperf3
+                    - --server
+
+    - name: client
+      dependsOn:
+        - name: server
+          status: Ready
+      replicas: 1
+      template:
+        metadata:
+          {{ macros.metadata(benchmark, "client") | indent(10) }}
+        spec:
+          {{ macros.job_defaults(benchmark) | indent(10) }}
+          parallelism: 1
+          completions: 1
+          template:
+            metadata:
+              {{ macros.pod_metadata(benchmark, "client", benchmark.spec.client, collect_logs = True) | indent(14) }}
+            spec:
+              {{ macros.pod_defaults(benchmark, benchmark.spec.client) | indent(14) }}
+              {{ macros.distribution_exclusive(benchmark, benchmark.spec.client) | indent(14) }}
+              containers:
+                - name: client
+                  {{ macros.container_defaults(benchmark, benchmark.spec.client) | indent(18) }}
+                  args:
+                    - iperf3
+                    - --client
+                    - "{{ macros.full_name(benchmark) }}-server-0-0.{{ macros.full_name(benchmark) }}"
+                    - --time
+                    - "{{ benchmark.spec.duration }}"
+                    - --parallel
+                    - "{{ benchmark.spec.streams }}"
+                    - --interval
+                    - "0"
+                    - --json
