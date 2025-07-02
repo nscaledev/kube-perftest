@@ -1,120 +1,113 @@
 {% import '_macros.j2' as macros %}
 
 ---
-{{ macros.discovery_service(benchmark) }}
----
-{{ macros.discovery_configmap(benchmark, server = 1, client = 1) }}
----
-{% call macros.job(benchmark) -%}
-minAvailable: 2
-tasks:
-  - name: server
-    replicas: 1
-    template:
-      metadata:
-        labels:
-          {{ macros.labels(benchmark, "server") | indent(10) }}
-        {%- if not benchmark.spec.host_network and benchmark.spec.network_name %}
-        annotations:
-          v1.multus-cni.io/default-network: {{ benchmark.spec.network_name }}
-        {%- endif %}
-      spec:
-        priorityClassName: {{ benchmark.status.priority_class_name }}
-        {%- if benchmark.spec.host_network %}
-        hostNetwork: true
-        dnsPolicy: ClusterFirstWithHostNet
-        {%- endif %}
-        initContainers:
-          - {{ macros.discovery_hosts_init_container(benchmark) | indent(12) }}
-          {{ macros.networking_mtu_init_container(benchmark) | indent(10) }}
-        containers:
-          - name: server
-            image: {{ benchmark.spec.image }}
-            imagePullPolicy: {{ benchmark.spec.image_pull_policy }}
-            securityContext:
-              capabilities:
-                add: [ "IPC_LOCK" ]
-            args:
-              - ib_{{ benchmark.spec.mode }}_bw
-              - -a
-              - -F
-              - --report_gbits
-              - -R
-              - -q
-              - "{{ benchmark.spec.qps }}"
-              - -n
-              - "{{ benchmark.spec.iterations }}"
-              {%- for arg in benchmark.spec.extra_args %}
-              - "{{ arg }}"
-              {%- endfor %}
-            {%- if benchmark.spec.resources %}
-            resources:
-              {{ benchmark.spec.resources | toyaml | indent(14) }}
-            {%- endif %}
-            volumeMounts:
-              {{ macros.discovery_volume_mounts(benchmark) | indent(14) }}
-        volumes:
-          - {{ macros.discovery_volume(benchmark) | indent(12) }}
-        # Because we generally want to test raw network performance, prevent the pod
-        # from running on a node that already has another benchmark component running,
-        # for any benchmark
-        {{ macros.distribution_exclusive(benchmark) | indent(8) }}
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ macros.full_name(benchmark) }}
+  {{ macros.metadata(benchmark, extra = benchmark.spec.job_set) | indent(2) }}
+spec:
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - client
+  replicatedJobs:
+    - name: server
+      replicas: 1
+      template:
+        metadata:
+          {{ macros.metadata(benchmark, "server") | indent(10) }}
+        spec:
+          {{ macros.job_defaults(benchmark) | indent(10) }}
+          parallelism: 1
+          completions: 1
+          template:
+            metadata:
+              {{ macros.pod_metadata(benchmark, "server", benchmark.spec.server) | indent(14) }}
+            spec:
+              {{ macros.pod_defaults(benchmark, benchmark.spec.server) | indent(14) }}
+              {{ macros.distribution_exclusive(benchmark, benchmark.spec.server) | indent(14) }}
+              containers:
+                - name: server
+                  {{ macros.container_defaults(benchmark, benchmark.spec.server) | indent(18) }}
+                  securityContext:
+                    {%- if benchmark.spec.host_network %}
+                    privileged: true
+                    {%- else %}
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                    {%- endif %}
+                  args:
+                    - bash
+                    - -c
+                    - |-
+                        set -e
+                        {%- if benchmark.spec.server.cpu_affinity is not none %}
+                        CPULIST="{{ benchmark.spec.server.cpu_affinity }}"
+                        {%- else %}
+                        CPULIST="$(cat /sys/class/infiniband/{{ benchmark.spec.server.device }}/device/local_cpulist)"
+                        {%- endif %}
+                        exec taskset -c "$CPULIST" \
+                          ib_{{ benchmark.spec.mode }}_bw \
+                            -F \
+                            {%- if benchmark.spec.connection_manager %}
+                            -R \
+                            {%- endif %}
+                            --report_gbits \
+                            -q {{ benchmark.spec.qps }} \
+                            -s {{ benchmark.spec.message_size }} \
+                            -D {{ benchmark.spec.duration }} \
+                            -d {{ benchmark.spec.server.device }}
 
-  - name: client
-    replicas: 1
-    policies:
-      # When the client terminates successfully, the job is done
-      - event: TaskCompleted
-        action: CompleteJob
-    template:
-      metadata:
-        labels:
-          {{ macros.labels(benchmark, "client") | indent(10) }}
-        {%- if not benchmark.spec.host_network and benchmark.spec.network_name %}
-        annotations:
-          v1.multus-cni.io/default-network: {{ benchmark.spec.network_name }}
-        {%- endif %}
-      spec:
-        priorityClassName: {{ benchmark.status.priority_class_name }}
-        {%- if benchmark.spec.host_network %}
-        hostNetwork: true
-        dnsPolicy: ClusterFirstWithHostNet
-        {%- endif %}
-        restartPolicy: OnFailure
-        initContainers:
-          - {{ macros.discovery_hosts_init_container(benchmark) | indent(12) }}
-          {{ macros.networking_mtu_init_container(benchmark) | indent(10) }}
-        containers:
-          - name: client
-            image: {{ benchmark.spec.image }}
-            imagePullPolicy: {{ benchmark.spec.image_pull_policy }}
-            securityContext:
-              capabilities:
-                add: [ "IPC_LOCK" ]
-            args:
-              - ib_{{ benchmark.spec.mode }}_bw
-              - -a
-              - -F
-              - --report_gbits
-              - -R
-              - -q
-              - "{{ benchmark.spec.qps }}"
-              - -n
-              - "{{ benchmark.spec.iterations }}"
-              {%- for arg in benchmark.spec.extra_args %}
-              - "{{ arg }}"
-              {%- endfor %}
-              - "{{ benchmark.metadata.name }}-server-0.{{ benchmark.metadata.name }}"
-            {%- if benchmark.spec.resources %}
-            resources:
-              {{ benchmark.spec.resources | toyaml | indent(14) }}
-            {%- endif %}
-            volumeMounts:
-              {{ macros.discovery_volume_mounts(benchmark) | indent(14) }}
-        volumes:
-          - {{ macros.discovery_volume(benchmark) | indent(12) }}
-        # Because we generally want to test raw network performance, prevent the pod
-        # from running on a node that already has another benchmark component running,
-        # for any benchmark
-        {{ macros.distribution_exclusive(benchmark) | indent(8) }}
-{%- endcall %}
+    - name: client
+      dependsOn:
+        - name: server
+          status: Ready
+      replicas: 1
+      template:
+        metadata:
+          {{ macros.metadata(benchmark, "client") | indent(10) }}
+        spec:
+          {{ macros.job_defaults(benchmark) | indent(10) }}
+          parallelism: 1
+          completions: 1
+          template:
+            metadata:
+              {{ macros.pod_metadata(benchmark, "client", benchmark.spec.client, collect_logs = True) | indent(14) }}
+            spec:
+              {{ macros.pod_defaults(benchmark, benchmark.spec.client) | indent(14) }}
+              {{ macros.distribution_exclusive(benchmark, benchmark.spec.client) | indent(14) }}
+              containers:
+                - name: client
+                  {{ macros.container_defaults(benchmark, benchmark.spec.client) | indent(18) }}
+                  securityContext:
+                    {%- if benchmark.spec.host_network %}
+                    privileged: true
+                    {%- else %}
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                    {%- endif %}
+                  args:
+                    - bash
+                    - -c
+                    - |-
+                        set -e
+                        {%- if benchmark.spec.client.cpu_affinity is not none %}
+                        CPULIST="{{ benchmark.spec.client.cpu_affinity }}"
+                        {%- else %}
+                        CPULIST="$(cat /sys/class/infiniband/{{ benchmark.spec.client.device }}/device/local_cpulist)"
+                        {%- endif %}
+                        exec taskset -c "$CPULIST" \
+                          ib_{{ benchmark.spec.mode }}_bw \
+                            -F \
+                            {%- if benchmark.spec.connection_manager %}
+                            -R \
+                            {%- endif %}
+                            --report_gbits \
+                            -q {{ benchmark.spec.qps }} \
+                            -s {{ benchmark.spec.message_size }} \
+                            -D {{ benchmark.spec.duration }} \
+                            -d {{ benchmark.spec.client.device }} \
+                            {{ macros.full_name(benchmark) }}-server-0-0.{{ macros.full_name(benchmark) }}

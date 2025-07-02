@@ -6,7 +6,10 @@ from pydantic import Field
 
 from kube_custom_resource import CustomResource, schema
 
-from ...template import Loader
+from ...config import settings
+
+if t.TYPE_CHECKING:
+    from ...template import Loader
 
 
 class ImagePullPolicy(str, schema.Enum):
@@ -18,45 +21,80 @@ class ImagePullPolicy(str, schema.Enum):
     NEVER = "Never"
 
 
-class ContainerResources(schema.BaseModel):
+class MetadataCustomisation(schema.BaseModel):
     """
-    Model for specifying container resources.
+    Defines customisation options for metadata.
     """
-    requests: schema.Dict[str, schema.Any] = Field(
+    labels: schema.Dict[str, str] = Field(
         default_factory = dict,
-        description = "The resource requests for the pod."
+        description = "Labels to add to the resource metadata."
     )
-    limits: schema.Dict[str, schema.Any] = Field(
+    annotations: schema.Dict[str, str] = Field(
         default_factory = dict,
-        description = "The resource limits for the pod."
+        description = "The annotations to add to the resource metadata."
+    )
+
+
+class PodCustomisation(MetadataCustomisation):
+    """
+    Defines the available customisations for pods.
+    """
+    node_affinity: schema.Dict[str, schema.Any] = Field(
+        default_factory = dict,
+        description = "Node affinity to apply to the pods."
+    )
+    resources: schema.Dict[str, schema.Any] = Field(
+        default_factory = dict,
+        description = "Resources to apply to the pod's containers."
+    )
+    node_selector: schema.Dict[str, str] = Field(
+        default_factory = dict,
+        description = "Node selector labels to apply to the pods."
+    )
+    tolerations: t.List[schema.Dict[str, schema.Any]] = Field(
+        default_factory = list,
+        description = "The tolerations to apply to the pods."
     )
 
 
 class BenchmarkSpec(schema.BaseModel):
     """
-    Base class for benchmark specs. Mainly deals with networking.
+    Base class for benchmark specs.
     """
+    image: schema.constr(min_length = 1) = Field(
+        ...,
+        description = "The image to use for the benchmark."
+    )
+    image_pull_policy: ImagePullPolicy = Field(
+        ImagePullPolicy(settings.default_image_pull_policy.value),
+        description = "The pull policy for the image."
+    )
+    paused: bool = Field(
+        False,
+        description = (
+            "Indicates that the benchmark reconciliation is paused. "
+            "When true, benchmark resources will not be created."
+        )
+    )
     host_network: bool = Field(
         False,
         description = "Indicates whether to use host networking or not."
     )
-    network_name: schema.Optional[schema.constr(min_length = 1)] = Field(
-        None,
-        description = (
-            "The name of a Multus network over which to run the benchmark. "
-            "Only used when host networking is false."
-        )
+    default_metadata: MetadataCustomisation = Field(
+        default_factory = MetadataCustomisation,
+        description = "Default metadata to apply to all resources for the benchmark."
     )
-    resources: schema.Optional[ContainerResources] = Field(
-        None,
-        description = "The resources to use for benchmark containers."
+    job_set: MetadataCustomisation = Field(
+        default_factory = MetadataCustomisation,
+        description = "Metadata to apply to the job set only."
     )
-    mtu: schema.Optional[schema.conint(gt = 0)] = Field(
-        None,
-        description = (
-            "The MTU to use for the benchmark. "
-            "Leave empty for the default MTU."
-        )
+    pods: PodCustomisation = Field(
+        default_factory = PodCustomisation,
+        description = "Customisations that apply to all the pods in the benchmark."
+    )
+    suspend: bool = Field(
+        False,
+        description = "Indicates whether the benchmark is suspended."
     )
 
 
@@ -66,30 +104,22 @@ class BenchmarkPhase(str, schema.Enum):
     """
     # Indicates that the state of the benchmark is not known
     UNKNOWN = "Unknown"
-    # Indicates that the benchmark is being prepared
-    PREPARING = "Preparing"
     # Indicates that the benchmark is waiting to be scheduled
     PENDING = "Pending"
-    # Indicates that the benchmark has been aborted and is waiting for cleanup
-    ABORTING = "Aborting"
-    # Indicates that the benchmark has been aborted
-    ABORTED = "Aborted"
-    # Indicates that minimum requested number of pods for the benchmark are running
+    # Indicates that all the pods requested for the benchmark are running
     RUNNING = "Running"
-    # Indicates that the benchmark is waiting for pods to be recreated
-    RESTARTING = "Restarting"
-    # Indicates that the benchmark has completed successfully and is waiting for cleanup
-    COMPLETING = "Completing"
-    # Indicates that cleanup has succeeded for the benchmark and it is producing a result
-    SUMMARISING = "Summarising"
+    # Indicates that the benchmark execution has completed but there are still tasks to perform
+    FINALIZING = "Finalizing"
     # Indicates that the benchmark has completed successfully
     COMPLETED = "Completed"
-    # Indicates that the benchmark finished unexpectedly and is waiting for cleanup
-    TERMINATING = "Terminating"
-    # Indicates that the benchmark finished unexpectedly, e.g. in response to an event
-    TERMINATED = "Terminated"
     # Indicates that the benchmark reached the maximum number of retries without completing
     FAILED = "Failed"
+
+    def is_terminal(self):
+        """
+        Indicates if the phase is a terminal phase.
+        """
+        return self in {self.COMPLETED, self.FAILED}
 
 
 class ResourceRef(schema.BaseModel):
@@ -147,13 +177,13 @@ class BenchmarkStatus(schema.BaseModel):
         BenchmarkPhase.UNKNOWN,
         description = "The phase of the benchmark."
     )
-    priority_class_name: schema.Optional[schema.constr(min_length = 1)] = Field(
-        None,
-        description = "The name of the priority class for the benchmark."
-    )
     managed_resources: t.List[ResourceRef] = Field(
         default_factory = list,
         description = "List of references to the managed resources for this benchmark."
+    )
+    pods: t.Dict[str, t.List[PodInfo]] = Field(
+        default_factory = dict,
+        description = "The pods in the benchmark, indexed by their component."
     )
     started_at: schema.Optional[datetime.datetime] = Field(
         None,
@@ -169,52 +199,23 @@ class Benchmark(CustomResource, abstract = True):
     """
     Base class for benchmark resources.
     """
+    spec: BenchmarkSpec = Field(
+        ...,
+        description = "The specification of the benchmark."
+    )
     status: BenchmarkStatus = Field(
         default_factory = BenchmarkStatus,
         description = "The status of the benchmark."
     )
 
-    def get_template(self) -> str:
+    def has_computed_result(self) -> bool:
         """
-        Returns the name of the template to use for this benchmark.
-        """
-        return f"{self._meta.singular_name}.yaml.j2"
-
-    def get_resources(self, template_loader: Loader) -> t.Iterable[t.Dict[str, t.Any]]:
-        """
-        Returns the resources to create for this benchmark.
-        """
-        # By default, this just renders a YAML template
-        return template_loader.yaml_template_all(self.get_template(), benchmark = self)
-
-    def job_modified(self, job: t.Dict[str, t.Any]):
-        """
-        Update the status of this benchmark to reflect a modification to the Volcano job.
-        """
-        # By default, update the benchmark phase to match the job
-        # The benchmark phase matches the Volcano job phase until it reaches "Completed"
-        # At that point, the benchmark goes into a Summarising phase, which triggers the
-        # calculation of the overall result
-        job_phase = job.get("status", {}).get("state", {}).get("phase", "Unknown")
-        if job_phase == "Completed":
-            self.status.phase = BenchmarkPhase.SUMMARISING
-        else:
-            self.status.phase = BenchmarkPhase(job_phase)
-
-    async def pod_modified(
-        self,
-        pod: t.Dict[str, t.Any],
-        fetch_pod_log: t.Callable[[], t.Awaitable[str]]
-    ):
-        """
-        Update the status of this benchmark to reflect a modification to one of its pods.
-
-        Receives the pod instance and an async function that can be called to get the pod log.
+        Indicates if the benchmark has computed its result.
         """
         raise NotImplementedError
 
-    def summarise(self):
+    async def compute_result_from_logs(self, logs: t.AsyncIterable[str]) -> t.Self:
         """
-        Update the status of this benchmark with overall results.
+        Compute the result for this benchmark from the pod logs.
         """
         raise NotImplementedError

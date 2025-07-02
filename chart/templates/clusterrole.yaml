@@ -19,79 +19,34 @@ rules:
     resources:
       - customresourcedefinitions
     resourceNames:
-      - benchmarksets.perftest.stackhpc.com
-      - iperfs.perftest.stackhpc.com
-      - mpipingpongs.perftest.stackhpc.com
-      - openfoams.perftest.stackhpc.com
-      - rdmabandwidths.perftest.stackhpc.com
-      - rdmalatencies.perftest.stackhpc.com
-      - fios.perftest.stackhpc.com
-      - pytorchs.perftest.stackhpc.com
+      - benchmarksets.perftest.nscale.com
+      - iperfs.perftest.nscale.com
+      - rdmabandwidths.perftest.nscale.com
+      - rdmalatencies.perftest.nscale.com
     verbs:
       - update
       - patch
-  # Required for kopf to watch resources properly
+  # Manipulating benchmark resources
   - apiGroups:
-      - ""
-    resources:
-      - namespaces
-    verbs:
-      - list
-      - watch
-  # Required for kopf to produce events properly
-  - apiGroups:
-      - ""
-      - events.k8s.io
-    resources:
-      - events
-    verbs:
-      - create
-  # We can manipulate our own objects
-  - apiGroups:
-      - perftest.stackhpc.com
+      - perftest.nscale.com
     resources:
       - "*"
     verbs:
       - "*"
-  # We need to be able to manipulate priority classes for jobs
+  # Manipulating jobsets
   - apiGroups:
-      - scheduling.k8s.io
+      - jobset.x-k8s.io
     resources:
-      - priorityclasses
+      - jobsets
     verbs:
       - "*"
-  # We need to manipulate Volcano jobs and "support resources"
-  - apiGroups:
-      - batch.volcano.sh
-    resources:
-      - jobs
-    verbs:
-      - "*"
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-      - secrets
-      - services
-    verbs:
-      - "*"
-  # We need to be able to watch endpoints and pod logs
-  - apiGroups:
-      - ""
-    resources:
-      - endpoints
-      - pods/log
-    verbs:
-      - list
-      - get
-      - watch
-  # We need to be able to watch and update pods
+  # Reading pod info
   - apiGroups:
       - ""
     resources:
       - pods
+      - pods/log
     verbs:
       - list
-      - get
       - watch
-      - patch
+      - get

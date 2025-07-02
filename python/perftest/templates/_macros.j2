@@ -1,4 +1,9 @@
-{% macro labels(benchmark, component = None) -%}
+{% macro full_name(benchmark) -%}
+{{- benchmark.kind | lower -}}-{{- benchmark.metadata.name -}}
+{%- endmacro %}
+
+
+{% macro default_labels(benchmark, component = None) -%}
 {{ settings.kind_label }}: {{ benchmark.kind }}
 {{ settings.namespace_label }}: {{ benchmark.metadata.namespace }}
 {{ settings.name_label }}: {{ benchmark.metadata.name }}
@@ -7,172 +12,102 @@
 {%- endif %}
 {%- endmacro %}
 
-{% macro discovery_service(benchmark) -%}
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ benchmark.metadata.name }}
-  labels:
-    {{ labels(benchmark) | indent(4) }}
-spec:
-  type: ClusterIP
-  clusterIP: None
-  selector:
-    {{ labels(benchmark) | indent(4) }}
+
+{% macro labels(benchmark, component = None, extra = None, extra2 = None) -%}
+{{-
+  benchmark.spec.default_metadata.labels |
+    mergeconcat(extra.labels | default({})) |
+    mergeconcat(extra2.labels | default({})) |
+    mergeconcat(default_labels(benchmark, component) | fromyaml) |
+    toyaml
+}}
 {%- endmacro %}
 
-{% macro discovery_configmap(benchmark) -%}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ benchmark.metadata.name }}-hosts
-  labels:
-    {{ labels(benchmark) | indent(4) }}
-    {{ settings.hosts_from_label }}: {{ benchmark.metadata.name }}
-data:
-{%- for name, replicas in kwargs.items() %}
-  {{ name }}-hosts: |
-{%- for idx in range(replicas) %}
-    {{ benchmark.metadata.name }}-{{ name }}-{{ idx }}.{{ benchmark.metadata.name }}
-{%- endfor %}
-{%- endfor %}
-{%- if benchmark.kind == "Fio" %}
-{%- for name, replicas in kwargs.items() %}
-{%- if name == "worker" %}
-  {{ name }}-hosts-fio: |
-{%- for idx in range(replicas) %}
-    {{ benchmark.metadata.name }}-{{ name }}-{{ idx }}.{{ benchmark.metadata.name }},{{ benchmark.spec.fio_port }}
-{%- endfor %}
+
+{% macro annotations(benchmark, extra = None, extra2 = None) -%}
+{{-
+  benchmark.spec.default_metadata.annotations |
+    mergeconcat(extra.annotations | default({})) |
+    mergeconcat(extra2.annotations | default({})) |
+    toyaml
+}}
+{%- endmacro %}
+
+
+{% macro metadata(benchmark, component = None, extra = None, extra2 = None) -%}
+labels:
+  {{ labels(benchmark, component, extra, extra2) | indent(2) }}
+annotations:
+  {{ annotations(benchmark, extra, extra2) | indent(2) }}
+{%- endmacro %}
+
+
+{% macro pod_metadata(benchmark, component = None, extra = None, collect_logs = False) -%}
+{{-
+  metadata(benchmark, component, benchmark.spec.pods, extra) |
+    fromyaml |
+    mergeconcat(
+      {
+        "labels": {
+          settings.log_collection_label: "true",
+        },
+      }
+      if collect_logs
+      else {}
+    ) |
+    toyaml
+-}}
+{%- endmacro %}
+
+
+{% macro container_defaults(benchmark, extra = None) -%}
+image: {{ benchmark.spec.image }}
+imagePullPolicy: {{ benchmark.spec.image_pull_policy.value }}
+resources:
+  {{
+    benchmark.spec.pods.resources |
+      mergeconcat(extra.resources | default({})) |
+      toyaml |
+      indent(2)
+  }}
+{%- endmacro %}
+
+
+{% macro pod_defaults(benchmark, extra = None) -%}
+{%- if benchmark.spec.host_network %}
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
 {%- endif %}
-{%- endfor %}
-{%- endif %}
-  all-hosts: |
-{%- for name, replicas in kwargs.items() %}
-{%- for idx in range(replicas) %}
-    {{ benchmark.metadata.name }}-{{ name }}-{{ idx }}.{{ benchmark.metadata.name }}
-{%- endfor %}
-{%- endfor %}
-  hosts: ""
+nodeSelector:
+  {{
+    benchmark.spec.pods.node_selector |
+      mergeconcat(extra.node_selector | default({})) |
+      toyaml |
+      indent(2)
+  }}
+tolerations:
+  {{
+    benchmark.spec.pods.tolerations |
+      mergeconcat(extra.tolerations | default([])) |
+      toyaml |
+      indent(2)
+  }}
 {%- endmacro %}
 
-{% macro discovery_hosts_init_container(benchmark) -%}
-name: wait-for-hosts
-image: {{ settings.discovery_container_image }}
-imagePullPolicy: {{ benchmark.spec.image_pull_policy | default(settings.default_image_pull_policy) }}
-args:
-  - bash
-  - -c
-  - |
-      set -e
-      until [ -s /etc/kube-perftest/hosts ]; do
-        echo "waiting for hosts file to become available"
-        sleep 1
-      done
-volumeMounts:
-  - name: kube-perftest-discovery
-    mountPath: /etc/kube-perftest
-    readOnly: true
+
+{% macro job_defaults(benchmark) -%}
 {%- endmacro %}
 
-{% macro discovery_wait_for_port_init_container(benchmark, port, component = "all") -%}
-name: wait-for-{{ component }}-port-{{ port }}
-image: {{ settings.discovery_container_image }}
-imagePullPolicy: {{ benchmark.spec.image_pull_policy | default(settings.default_image_pull_policy) }}
-args:
-  - bash
-  - -c
-  - |
-      set -e
-      
-      # Make sure that /etc/hosts both gets populated with benchmark pod IPs
-      # and mounted correctly before checking port liveness. 
-      # If /etc/hosts is mounted before it is populated, it can stay empty 
-      # despite it's underlying configMap being populated asynchronously.
-      # The logic here is:
-      # 1. If /etc/hosts is empty, wait for all of the pods participating in
-      #    the benchmark to be populated in /etc/kube-perftest/hosts. When all
-      #    pod IPs are available in /etc/kube-perftest/hosts, exit 1 to allow
-      #    Kubelet to restart the container and remount a fully populated
-      #    /etc/hosts.
-      # 2. If /etc/hosts is not empty, check that a record is present for 
-      #    every pod participating in the benchmark, and exit 1 if a
-      #    record for a pod is not found.
-      
-      if [ ! -s /etc/hosts ]; then
-        echo "/etc/hosts is empty, waiting for hosts to be populated..."
-        
-        while read host; do
-          until grep -q "${host}" /etc/kube-perftest/hosts; do
-            sleep 1
-          done
-          echo "IP populated for ${host}" 
-        done < /etc/kube-perftest/all-hosts
-        
-        echo "All hosts populated, exiting to ensure /etc/hosts is mounted correctly."
-        
-        exit 1
-      else
-        echo "Checking for all benchmark hosts in /etc/hosts"
-        
-        while read host; do
-          if ! grep -q "${host}" /etc/hosts; then
-            echo "No record for ${host} in /etc/hosts, quitting."
-            exit 1
-          else
-            echo "Found ${host} in /etc/hosts, continuing..."
-          fi
-        done < /etc/kube-perftest/all-hosts
-      fi
 
-      while read host; do
-        if [ -z "$host" ]; then
-          continue
-        fi
-        until nc -z "$host" {{ port }}; do
-          echo "Waiting for port {{ port }} on $host..."
-          sleep 1
-        done
-      done < /etc/kube-perftest/{{ component }}-hosts
-volumeMounts:
-  {{ discovery_volume_mounts(benchmark) | indent(2) }}
-{%- endmacro %}
-
-{% macro discovery_volume(benchmark) -%}
-name: kube-perftest-discovery
-configMap:
-  name: {{ benchmark.metadata.name }}-hosts
-{%- endmacro %}
-
-{% macro discovery_volume_mounts(benchmark) -%}
-- name: kube-perftest-discovery
-  mountPath: /etc/hosts
-  subPath: hosts
-  readOnly: true
-- name: kube-perftest-discovery
-  mountPath: /etc/kube-perftest
-  readOnly: true
-{%- endmacro %}
-
-{% macro job(benchmark) -%}
-apiVersion: batch.volcano.sh/v1alpha1
-kind: Job
-metadata:
-  name: {{ benchmark.metadata.name }}
-  labels:
-    {{ labels(benchmark) | indent(4) }}
-spec:
-  maxRetry: 10
-  schedulerName: {{ settings.scheduler_name }}
-  queue: {{ settings.queue_name }}
-  priorityClassName: {{ benchmark.status.priority_class_name }}
-  policies:
-    - event: PodEvicted
-      action: RestartJob
-  {{ caller() | indent(2) }}
-{%- endmacro %}
-
-{% macro distribution_exclusive(benchmark) -%}
+{% macro distribution_exclusive(benchmark, extra = None) -%}
 affinity:
+  nodeAffinity:
+    {{
+      benchmark.spec.pods.node_affinity |
+        mergeconcat(extra.node_affinity | default({})) |
+        toyaml |
+        indent(4)
+    }}
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
@@ -182,18 +117,16 @@ affinity:
         topologyKey: "kubernetes.io/hostname"
 {%- endmacro %}
 
-{% macro distribution_spread(benchmark, component = None) -%}
+
+{% macro distribution_spread(benchmark, component = None, extra = None) -%}
 affinity:
-  # In order to prevent topologySpreadConstraints from considering
-  # the control-plane nodes, we have to explicitly exclude them here
-  # 1.25 adds "nodeTaintsPolicy: Honor" to topologySpreadConstraints as
-  # an alpha-level field that should allow us to remove this in the future
   nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-        - matchExpressions:
-            - key: node-role.kubernetes.io/control-plane
-              operator: DoesNotExist
+    {{
+      benchmark.spec.pods.node_affinity |
+        mergeconcat(extra.node_affinity | default({})) |
+        toyaml |
+        indent(4)
+    }}
   # Avoid pods from other jobs
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -232,13 +165,16 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         {{ labels(benchmark, component) | indent(8) }}
+    nodeAffinityPolicy: Honor
+    nodeTaintsPolicy: Honor
 {%- endmacro %}
+
 
 {% macro ssh_configmap(benchmark) -%}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ benchmark.metadata.name }}-ssh-config
+  name: {{ macros.full_name(benchmark) }}-ssh-config
   labels:
     {{ labels(benchmark) | indent(4) }}
 data:
@@ -246,33 +182,17 @@ data:
     Port {{ benchmark.spec.ssh_port }}
 {%- endmacro %}
 
+
 {% macro ssh_volume(benchmark) -%}
 name: ssh-config
 configMap:
-  name: {{ benchmark.metadata.name }}-ssh-config
+  name: {{ macros.full_name(benchmark) }}-ssh-config
 {%- endmacro %}
+
 
 {% macro ssh_volume_mount(benchmark) -%}
 name: ssh-config
 mountPath: /etc/ssh/ssh_config.d/01-default-port.conf
 subPath: 01-default-port.conf
 readOnly: true
-{%- endmacro %}
-
-{% macro networking_mtu_init_container(benchmark, interface = "eth0") -%}
-{%- if benchmark.spec.mtu %}
-- name: ensure-mtu
-  image: {{ settings.discovery_container_image }}
-  imagePullPolicy: {{ benchmark.spec.image_pull_policy | default(settings.default_image_pull_policy) }}
-  securityContext:
-    capabilities:
-      add: [ "NET_ADMIN", "NET_RAW" ]
-  args:
-    - ip
-    - link
-    - set
-    - {{ interface }}
-    - mtu
-    - "{{ benchmark.spec.mtu }}"
-{%- endif %}
 {%- endmacro %}

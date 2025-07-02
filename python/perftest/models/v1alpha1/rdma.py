@@ -29,19 +29,9 @@ RDMA_LATENCY_REGEX = re.compile(
     r"\s+"
     r"(?P<iterations>\d+)"
     r"\s+"
-    r"(?P<minimum>\d+(\.\d+)?)"
-    r"\s+"
-    r"(?P<maximum>\d+(\.\d+)?)"
-    r"\s+"
-    r"(?P<typical>\d+(\.\d+)?)"
-    r"\s+"
     r"(?P<average>\d+(\.\d+)?)"
     r"\s+"
-    r"(?P<stdev>\d+(\.\d+)?)"
-    r"\s+"
-    r"(?P<percentile_99>\d+(\.\d+)?)"
-    r"\s+"
-    r"(?P<percentile_99_9>\d+(\.\d+)?)"
+    r"(?P<tps_average>\d+(\.\d+)?)"
 )
 
 
@@ -53,6 +43,24 @@ class RDMAMode(str, schema.Enum):
     WRITE = "write"
 
 
+class RDMAComponent(base.PodCustomisation):
+    """
+    Overrides for the individual RDMA components.
+    """
+    device: schema.constr(min_length = 1) = Field(
+        "mlx5_0",
+        description = "The device to use. Defaults to mlx5_0 if not given."
+    )
+    cpu_affinity: schema.Optional[schema.XKubernetesIntOrString] = Field(
+        None,
+        description = (
+            "The CPU affinity for the process. "
+            "Any format accepted by taskset can be given. "
+            "If not given, the local CPU list for the device is used."
+        )
+    )
+
+
 class RDMASpec(base.BenchmarkSpec):
     """
     Defines the common parameters for RDMA benchmarks.
@@ -61,86 +69,37 @@ class RDMASpec(base.BenchmarkSpec):
         f"{settings.default_image_prefix}perftest:{settings.default_image_tag}",
         description = "The image to use for the benchmark."
     )
-    image_pull_policy: base.ImagePullPolicy = Field(
-        base.ImagePullPolicy.IF_NOT_PRESENT,
-        description = "The pull policy for the image."
-    )
     mode: RDMAMode = Field(
         RDMAMode.READ,
         description = "The mode for the test."
     )
-    iterations: schema.conint(ge = 5) = Field(
-        1000,
-        description = "The number of iterations for each message size."
+    connection_manager: bool = Field(
+        False,
+        description = "Indicates whether to use the RDMA connection manager."
     )
-    extra_args: t.List[schema.constr(min_length = 1)] = Field(
-        default_factory = list,
-        description = "Extra arguments for the command."
+    duration: schema.conint(gt = 0) = Field(
+        30,
+        description = "The number of seconds to run the test for (default 30)."
     )
-
-
-class RDMAStatus(base.BenchmarkStatus):
-    """
-    Base class for the status of an RDMA benchmark.
-    """
-    client_log: schema.Optional[schema.constr(min_length = 1)] = Field(
-        None,
-        description = "The raw pod log of the client pod."
+    server: RDMAComponent = Field(
+        default_factory = RDMAComponent,
+        description = "Customisations for the server pod."
     )
-    server_pod: schema.Optional[base.PodInfo] = Field(
-        None,
-        description = "Pod information for the server pod."
+    client: RDMAComponent = Field(
+        default_factory = RDMAComponent,
+        description = "Customisations for the client pod."
     )
-    client_pod: schema.Optional[base.PodInfo] = Field(
-        None,
-        description = "Pod information for the client pod."
-    )
-
-
-class RDMABenchmark(base.Benchmark, abstract = True):
-    """
-    Base class for RDMA benchmarks.
-    """
-    spec: RDMASpec = Field(
-        ...,
-        description = "The parameters for the benchmark."
-    )
-    status: RDMAStatus = Field(
-        default_factory = RDMAStatus,
-        description = "The status of the benchmark."
-    )
-
-    async def pod_modified(
-        self,
-        pod: t.Dict[str, t.Any],
-        fetch_pod_log: t.Callable[[], t.Awaitable[str]]
-    ):
-        component = pod["metadata"]["labels"][settings.component_label]
-        pod_phase = pod.get("status", {}).get("phase", "Unknown")
-        # If the pod is in the running phase, record the info
-        if pod_phase == "Running":
-            setattr(self.status, f"{component}_pod", base.PodInfo.from_pod(pod))
-        # When a client pod succeeds, record the pod log
-        elif component == "client" and pod_phase == "Succeeded":
-            self.status.client_log = await fetch_pod_log()
-
-    def extract_result(self, pod_log_lines: t.Iterable[str]):
-        """
-        Extract a result from the client pod log.
-        """
-        raise NotImplementedError
-
-    def summarise(self):
-        # If the client log has not yet been recorded, bail
-        if not self.status.client_log:
-            raise PodResultsIncompleteError("client pod has not recorded logs yet")
-        self.extract_result(self.status.client_log.splitlines())
 
 
 class RDMABandwidthSpec(RDMASpec):
     """
     Defines the parameters for the RDMA bandwidth benchmark.
     """
+    message_size: schema.conint(gt = 0) = Field(
+        # Large messages should get us a good bandwidth number
+        4194304,
+        description = "The message size to use in bytes (default 4194304)."
+    )
     qps: schema.conint(gt = 0) = Field(
         1,
         description = "The number of Queue Pairs (QPs) to use."
@@ -173,42 +132,28 @@ class RDMABandwidthResult(schema.BaseModel):
     )
 
 
-class RDMABandwidthStatus(RDMAStatus):
+class RDMABandwidthStatus(base.BenchmarkStatus):
     """
     Represents the status of the RDMA bandwidth benchmark.
     """
-    results: t.List[RDMABandwidthResult] = Field(
-        default_factory = list,
-        description = "List of results for each message length."
-    )
-    peak_bandwidth: schema.Optional[schema.constr(min_length = 1)] = Field(
+    result: schema.Optional[RDMABandwidthResult] = Field(
         None,
-        description = (
-            "The peak bandwidth achieved during the benchmark. "
-            "Used as a headline result."
-        )
+        description = "The result of the test."
+    )
+    formatted_result: schema.Optional[schema.constr(min_length = 1)] = Field(
+        None,
+        description = "Result formatted with units for rendering."
     )
 
 
 class RDMABandwidth(
-    RDMABenchmark,
+    base.Benchmark,
     subresources = {"status": {}},
     printer_columns = [
         {
             "name": "Host Network",
             "type": "boolean",
             "jsonPath": ".spec.hostNetwork",
-        },
-        {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
-        },
-        {
-            "name": "MTU",
-            "type": "integer",
-            "jsonPath": ".spec.mtu",
-            "priority": 1,
         },
         {
             "name": "Mode",
@@ -221,9 +166,19 @@ class RDMABandwidth(
             "jsonPath": ".spec.qps",
         },
         {
-            "name": "Iterations",
+            "name": "Msg Size",
             "type": "string",
-            "jsonPath": ".spec.iterations",
+            "jsonPath": ".spec.messageSize",
+        },
+        {
+            "name": "Duration",
+            "type": "string",
+            "jsonPath": ".spec.duration",
+        },
+        {
+            "name": "Paused",
+            "type": "boolean",
+            "jsonPath": ".spec.paused",
         },
         {
             "name": "Status",
@@ -231,15 +186,15 @@ class RDMABandwidth(
             "jsonPath": ".status.phase",
         },
         {
-            "name": "Server IP",
+            "name": "Server",
             "type": "string",
-            "jsonPath": ".status.serverPod.podIp",
+            "jsonPath": ".status.pods.server[0].nodeName",
             "priority": 1,
         },
         {
-            "name": "Client IP",
+            "name": "Client",
             "type": "string",
-            "jsonPath": ".status.clientPod.podIp",
+            "jsonPath": ".status.pods.client[0].nodeName",
             "priority": 1,
         },
         {
@@ -253,9 +208,9 @@ class RDMABandwidth(
             "jsonPath": ".status.finishedAt",
         },
         {
-            "name": "Peak Bandwidth",
+            "name": "Avg Bandwidth",
             "type": "string",
-            "jsonPath": ".status.peakBandwidth",
+            "jsonPath": ".status.formattedResult",
         },
     ]
 ):
@@ -271,35 +226,49 @@ class RDMABandwidth(
         description = "The status of the benchmark."
     )
 
-    def extract_result(self, pod_log_lines: t.Iterable[str]):
-        # Drop the lines from the log until we reach the start of the results
-        lines = it.dropwhile(lambda l: not l.strip().startswith("#bytes"), pod_log_lines)
-        # Skip the header
-        _ = next(lines)
-        # Collect the results for each message size along with the peak result
-        results = []
-        peak_result = None
-        for line in lines:
+    def has_computed_result(self) -> bool:
+        """
+        Indicates if the benchmark has computed its result.
+        """
+        return self.status.result is not None
+
+    async def compute_result_from_logs(self, logs: t.AsyncIterable[str]) -> t.Self:
+        """
+        Compute the result for this benchmark from the pod logs.
+        """
+        # Only the client pods are labelled for log collection and there should only be one
+        try:
+            client_log = await anext(aiter(logs))
+        except StopAsyncIteration:
+            raise PodResultsIncompleteError("client logs are not available")
+        # Find the first line that matches our regex and save the result
+        for line in client_log.splitlines():
             match = RDMA_BANDWIDTH_REGEX.search(line.strip())
             if match is not None:
-                result = RDMABandwidthResult(
+                self.status.result = RDMABandwidthResult(
                     bytes = match.group("bytes"),
                     iterations = match.group("iterations"),
                     peak_bandwidth = match.group("bw_peak"),
                     average_bandwidth = match.group("bw_avg"),
                     message_rate = match.group("msg_rate")
                 )
-                results.append(result)
-                if not peak_result or result.peak_bandwidth > peak_result.peak_bandwidth:
-                    peak_result = result
-            else:
-                continue
-        if results:
-            self.status.results = results
-        else:
+                break
+        if self.status.result is None:
             raise PodLogFormatError("unable to locate results in pod log")
-        # Format the peak result for display
-        self.status.peak_bandwidth = f"{peak_result.peak_bandwidth} Gbit/sec"
+        # Format the average result for display
+        self.status.formatted_result = f"{self.status.result.average_bandwidth} Gbit/sec"
+        return self
+
+
+class RDMALatencySpec(RDMASpec):
+    """
+    Defines the parameters for the RDMA bandwidth benchmark.
+    """
+    message_size: schema.conint(gt = 0) = Field(
+        # Small messages will have the best latency
+        2,
+        description = "The message size to use in bytes (default 2)."
+    )
 
 
 class RDMALatencyResult(schema.BaseModel):
@@ -314,55 +283,32 @@ class RDMALatencyResult(schema.BaseModel):
         ...,
         description = "The number of iterations."
     )
-    minimum: schema.confloat(ge = 0) = Field(
-        ...,
-        description = "The minimum latency in usecs."
-    )
-    maximum: schema.confloat(ge = 0) = Field(
-        ...,
-        description = "The maximum latency in usecs."
-    )
-    typical: schema.confloat(ge = 0) = Field(
-        ...,
-        description = "The typical latency in usecs."
-    )
     average: schema.confloat(ge = 0) = Field(
         ...,
         description = "The average latency in usecs."
     )
-    stdev: schema.confloat(ge = 0) = Field(
+    tps_average: schema.confloat(ge = 0) = Field(
         ...,
-        description = "The standard deviation of the latency in usecs."
-    )
-    percentile_99: schema.confloat(ge = 0) = Field(
-        ...,
-        description = "The 99% percentile of the latency in usecs."
-    )
-    percentile_99_9: schema.confloat(ge = 0) = Field(
-        ...,
-        description = "The 99.9% percentile of the latency in usecs."
+        description = "The average number of transactions per second."
     )
 
 
-class RDMALatencyStatus(RDMAStatus):
+class RDMALatencyStatus(base.BenchmarkStatus):
     """
     Represents the status of the RDMA latency benchmark.
     """
-    results: t.List[RDMALatencyResult] = Field(
-        default_factory = list,
-        description = "List of results for each message length."
-    )
-    minimum_average_latency: schema.Optional[schema.constr(min_length = 1)] = Field(
+    result: schema.Optional[RDMALatencyResult] = Field(
         None,
-        description = (
-            "The minimum average latency for any message length. "
-            "Used as a headline result."
-        )
+        description = "Result of the latency test."
+    )
+    formatted_result: schema.Optional[schema.constr(min_length = 1)] = Field(
+        None,
+        description = "Result formatted with units for rendering."
     )
 
 
 class RDMALatency(
-    RDMABenchmark,
+    base.Benchmark,
     plural_name = "rdmalatencies",
     subresources = {"status": {}},
     printer_columns = [
@@ -372,25 +318,24 @@ class RDMALatency(
             "jsonPath": ".spec.hostNetwork",
         },
         {
-            "name": "Network Name",
-            "type": "string",
-            "jsonPath": ".spec.networkName",
-        },
-        {
-            "name": "MTU",
-            "type": "integer",
-            "jsonPath": ".spec.mtu",
-            "priority": 1,
-        },
-        {
             "name": "Mode",
             "type": "string",
             "jsonPath": ".spec.mode",
         },
         {
-            "name": "Iterations",
+            "name": "Msg Size",
             "type": "string",
-            "jsonPath": ".spec.iterations",
+            "jsonPath": ".spec.messageSize",
+        },
+        {
+            "name": "Duration",
+            "type": "string",
+            "jsonPath": ".spec.duration",
+        },
+        {
+            "name": "Paused",
+            "type": "boolean",
+            "jsonPath": ".spec.paused",
         },
         {
             "name": "Status",
@@ -398,15 +343,15 @@ class RDMALatency(
             "jsonPath": ".status.phase",
         },
         {
-            "name": "Server IP",
+            "name": "Server",
             "type": "string",
-            "jsonPath": ".status.serverPod.podIp",
+            "jsonPath": ".status.pods.server[0].nodeName",
             "priority": 1,
         },
         {
-            "name": "Client IP",
+            "name": "Client",
             "type": "string",
-            "jsonPath": ".status.clientPod.podIp",
+            "jsonPath": ".status.pods.client[0].nodeName",
             "priority": 1,
         },
         {
@@ -420,50 +365,52 @@ class RDMALatency(
             "jsonPath": ".status.finishedAt",
         },
         {
-            "name": "Min Avg Latency",
+            "name": "Avg Latency",
             "type": "string",
-            "jsonPath": ".status.minimumAverageLatency",
+            "jsonPath": ".status.formattedResult",
         },
     ]
 ):
     """
     Custom resource for running an RDMA latency benchmark.
     """
+    spec: RDMALatencySpec = Field(
+        ...,
+        description = "The parameters for the benchmark."
+    )
     status: RDMALatencyStatus = Field(
         default_factory = RDMALatencyStatus,
         description = "The status of the benchmark."
     )
 
-    def extract_result(self, pod_log_lines: t.Iterable[str]):
-        # Drop the lines from the log until we reach the start of the results
-        lines = it.dropwhile(lambda l: not l.strip().startswith("#bytes"), pod_log_lines)
-        # Skip the header
-        _ = next(lines)
-        # Collect the results for each message size along with the peak result
-        results = []
-        min_result = None
-        for line in lines:
+    def has_computed_result(self) -> bool:
+        """
+        Indicates if the benchmark has computed its result.
+        """
+        return self.status.result is not None
+
+    async def compute_result_from_logs(self, logs: t.AsyncIterable[str]) -> t.Self:
+        """
+        Compute the result for this benchmark from the pod logs.
+        """
+        # Only the client pods are labelled for log collection and there should only be one
+        try:
+            client_log = await anext(aiter(logs))
+        except StopIteration:
+            raise PodResultsIncompleteError("client logs are not available")
+        # Find the first line that matches our regex and save the result
+        for line in client_log.splitlines():
             match = RDMA_LATENCY_REGEX.search(line.strip())
             if match is not None:
-                result = RDMALatencyResult(
+                self.status.result = RDMALatencyResult(
                     bytes = match.group("bytes"),
                     iterations = match.group("iterations"),
-                    minimum = match.group("minimum"),
-                    maximum = match.group("maximum"),
-                    typical = match.group("typical"),
                     average = match.group("average"),
-                    stdev = match.group("stdev"),
-                    percentile_99 = match.group("percentile_99"),
-                    percentile_99_9 = match.group("percentile_99_9")
+                    tps_average = match.group("tps_average")
                 )
-                results.append(result)
-                if not min_result or result.average < min_result.average:
-                    min_result = result
-            else:
-                continue
-        if results:
-            self.status.results = results
-        else:
+                break
+        if self.status.result is None:
             raise PodLogFormatError("unable to locate results in pod log")
-        # Format the peak result for display
-        self.status.minimum_average_latency = f"{min_result.average} usec"
+        # Format the average result for display
+        self.status.formatted_result = f"{self.status.result.average} usec"
+        return self

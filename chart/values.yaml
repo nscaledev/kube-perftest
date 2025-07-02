@@ -1,7 +1,6 @@
 # Configuration for the operator
 # For available options, see python/perftest/config.py
-config:
-  defaultImagePrefix: ghcr.io/nscaledev/kube-perftest-
+config: {}
 
 # The operator image to use
 image:
@@ -14,6 +13,8 @@ imagePullSecrets: []
 # Pod-level security context
 podSecurityContext:
   runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
 
 # Container-level security context
 securityContext:
