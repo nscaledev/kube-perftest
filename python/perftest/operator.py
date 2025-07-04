@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import importlib.metadata
 import logging
 
 from pydantic.json import custom_pydantic_encoder
@@ -8,12 +9,22 @@ import easykube
 import easykube_runtime
 from easykube_runtime.ext import kube_custom_resource as kcr_runtime
 
-from . import models, reconcilers, template
+from . import models, reconcilers, scheduling, template
 from .config import settings
 from .models import v1alpha1 as api
 
 
 logger = logging.getLogger(__name__)
+
+
+def init_scheduling_strategy() -> scheduling.SchedulingStrategy:
+    """
+    Initialise the scheduling strategy from the settings.
+    """
+    eps = importlib.metadata.entry_points(group = "kube-perftest.scheduling-strategy")
+    strategy_class = eps[settings.scheduling_strategy.name].load()
+    config = strategy_class.config_class().model_validate(settings.scheduling_strategy.config)
+    return strategy_class.from_config(settings, config)
 
 
 async def run():
@@ -22,6 +33,10 @@ async def run():
     """
     logger.info("Creating template loader")
     template_loader = template.Loader(settings = settings)
+
+    logger.info("Initializing scheduling strategy")
+    scheduling_strategy = init_scheduling_strategy()
+
 
     logger.info("Creating Kubernetes client")
     config = easykube.Configuration.from_environment(
@@ -91,7 +106,8 @@ async def run():
                     reconcilers.BenchmarkReconciler(
                         settings.api_group,
                         model,
-                        template_loader
+                        template_loader,
+                        scheduling_strategy
                     )
                 )
                 benchmark_controller.subscribe_watch(

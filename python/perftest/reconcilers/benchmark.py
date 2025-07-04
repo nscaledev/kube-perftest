@@ -6,7 +6,7 @@ import easykube
 import easykube_runtime
 from easykube_runtime.ext import kube_custom_resource as kcr_runtime
 
-from .. import errors, template
+from .. import errors, scheduling, template
 from ..config import settings
 from ..models import v1alpha1 as api
 
@@ -20,11 +20,13 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
         api_group: str,
         model: t.Type[api.Benchmark],
         template_loader: template.Loader,
+        scheduling_strategy: scheduling.SchedulingStrategy,
         *,
         finalizer: t.Optional[str] = None
     ):
         super().__init__(api_group, model, finalizer = finalizer)
         self._template_loader = template_loader
+        self._scheduling_strategy = scheduling_strategy
 
     async def ensure_benchmark_resources(
         self,
@@ -34,9 +36,15 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
         """
         Ensures that the benchmark resources are created and return the resources.
         """
-        # Template the resources
+        # Template the resources for the benchmark
         template = f"{instance._meta.singular_name}.yaml.j2"
         resources = self._template_loader.yaml_template_all(template, benchmark = instance)
+        # Give the scheduling strategy a chance to modify the benchmark resources
+        resources = await self._scheduling_strategy.apply(
+            client,
+            instance,
+            resources
+        )
         # Ensure that the resources exist
         # Adopt the resources so that we can identify the owning benchmark easily
         for resource in resources:
@@ -152,6 +160,22 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
                     namespace = pod["metadata"]["namespace"]
                 )
 
+    async def cleanup_resources(
+        self,
+        client: easykube.AsyncClient,
+        instance: api.Benchmark
+    ):
+        """
+        Cleans up the resources that were used to run the benchmark.
+        """
+        # Delete all of the managed resources
+        for ref in instance.status.managed_resources:
+            resource = await client.api(ref.api_version).resource(ref.kind)
+            await resource.delete(ref.name, namespace = instance.metadata.namespace)
+
+        # Ask the scheduling strategy to clean up any supporting resources
+        await self._scheduling_strategy.cleanup(client, instance)
+
     async def reconcile_normal(
         self,
         client: easykube.AsyncClient,
@@ -193,9 +217,7 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
                 return instance, easykube_runtime.Result()
 
             # Clean up the managed resources and mark the benchmark as completed
-            for ref in instance.status.managed_resources:
-                resource = await client.api(ref.api_version).resource(ref.kind)
-                await resource.delete(ref.name, namespace = instance.metadata.namespace)
+            await self.cleanup_resources(client, instance)
             instance.status.managed_resources = []
             instance.status.phase = api.BenchmarkPhase.COMPLETED
             instance.status.finished_at = datetime.datetime.now()
@@ -236,9 +258,5 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
         """
         Reconcile the deletion of the given benchmark.
         """
-        # Delete all of the managed resources
-        for ref in instance.status.managed_resources:
-            resource = await client.api(ref.api_version).resource(ref.kind)
-            await resource.delete(ref.name, namespace = instance.metadata.namespace)
-        
+        await self.cleanup_resources(client, instance)
         return instance, easykube_runtime.Result()

@@ -1,9 +1,17 @@
 import enum
+import importlib.metadata
 import typing as t
 
-from pydantic import Field, conint, constr
+from pydantic import Field, ValidationInfo, field_validator, conint, constr
 
-from configomatic import Configuration as BaseConfiguration, LoggingConfiguration
+from configomatic import (
+    Configuration as BaseConfiguration,
+    Section,
+    LoggingConfiguration
+)
+
+
+SCHEDULING_STRATEGY_GROUP = "kube-perftest.scheduling-strategy"
 
 
 class ImagePullPolicy(str, enum.Enum):
@@ -15,15 +23,58 @@ class ImagePullPolicy(str, enum.Enum):
     NEVER = "Never"
 
 
-class Configuration(BaseConfiguration):
+class SchedulingStrategyConfig(Section):
+    """
+    Configuration for the scheduling strategy.
+    """
+    #: The name of the scheduling strategy to use
+    #: Defaults to the built-in priorityclass strategy
+    name: constr(min_length = 1) = Field("priorityclass", validate_default = True)
+    #: The configuration for the scheulding strategy
+    config: t.Dict[str, t.Any] = Field(default_factory = dict, validate_default = True)
+
+    @field_validator("name", mode = "after")
+    @classmethod
+    def validate_name(cls, value):
+        """
+        Validate the name against the available entry points for the scheduling strategy group.
+        """
+        available = [
+            ep.name
+            for ep in importlib.metadata.entry_points(group = SCHEDULING_STRATEGY_GROUP)
+        ]
+        if value in available:
+            return value
+        else:
+            raise ValueError(f"must be one of {repr(available)}")
+
+    @field_validator("config", mode = "after")
+    @classmethod
+    def validate_config(cls, value, info: ValidationInfo):
+        """
+        Validate the config against the model for the selected strategy.
+        """
+        # We can only validate the config if we have a valid name
+        # If name is in the data, we know it is valid
+        if "name" in info.data:
+            # The config must validate against the config model, but we want to return a dict
+            eps = importlib.metadata.entry_points(group = SCHEDULING_STRATEGY_GROUP)
+            strategy_class = eps[info.data["name"]].load()
+            config = strategy_class.config_class().model_validate(value)
+            return config.model_dump()
+        else:
+            return value
+
+
+class Configuration(
+    BaseConfiguration,
+    default_path = "/etc/kube-perftest/config.yaml",
+    path_env_var = "KUBE_PERFTEST_CONFIG",
+    env_prefix = "KUBE_PERFTEST"
+):
     """
     Top-level configuration model.
     """
-    class Config:
-        default_path = "/etc/kube-perftest/config.yaml"
-        path_env_var = "KUBE_PERFTEST_CONFIG"
-        env_prefix = "KUBE_PERFTEST"
-
     #: The logging configuration
     logging: LoggingConfiguration = Field(default_factory = LoggingConfiguration)
 
@@ -55,6 +106,11 @@ class Configuration(BaseConfiguration):
     component_label: constr(min_length = 1) = "perftest.nscale.com/benchmark-component"
     #: Label specifying that a pod needs its logs collected
     log_collection_label: constr(min_length = 1) = "perftest.nscale.com/collect-logs"
+
+    #: The scheduling strategy to use
+    scheduling_strategy: SchedulingStrategyConfig = Field(
+        default_factory = SchedulingStrategyConfig
+    )
 
     #: The number of workers to use for the runtime manager
     runtime_manager_worker_count: conint(gt = 0) = 10

@@ -79,7 +79,7 @@ class Loader:
         /,
         _safe: bool = True,
         **params: t.Any
-    ) -> t.Dict[str, t.Any]:
+    ) -> t.Iterable[t.Dict[str, t.Any]]:
         """
         Render the given template string with the given params, parse the result as YAML
         and return the resulting objects.
@@ -99,7 +99,7 @@ class Loader:
         """
         return yaml.safe_load(self.render_template(template, **params))
 
-    def yaml_template_all(self, template: str, **params: t.Any) -> t.Dict[str, t.Any]:
+    def yaml_template_all(self, template: str, **params: t.Any) -> t.Iterable[t.Dict[str, t.Any]]:
         """
         Render the specified template with the given params, parse the result as YAML and
         return the resulting objects.

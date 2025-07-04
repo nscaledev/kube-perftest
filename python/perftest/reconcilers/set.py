@@ -100,7 +100,7 @@ class BenchmarkSetReconciler(kcr_runtime.CustomResourceReconciler):
         padding_width = math.floor(math.log(instance.status.count, 10)) + 1
 
         # Produce a benchmark for each parameter sets
-        for idx, params in enumerate(parameter_sets):
+        for idx, params in enumerate(parameter_sets, 1):
             resource = {
                 "apiVersion": instance.spec.template.api_version,
                 "kind": instance.spec.template.kind,
