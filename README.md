@@ -75,7 +75,7 @@ Runs the [iperf](https://en.wikipedia.org/wiki/Iperf) network performance tool t
 for a transfer between two pods.
 
 ```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
+apiVersion: perftest.nscale.com/v1alpha1
 kind: IPerf
 metadata:
   name: iperf
@@ -116,7 +116,7 @@ Runs the RDMA bandwidth benchmarks (i.e. `ib_{read,write}_bw`) from the
 > ```
 
 ```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
+apiVersion: perftest.nscale.com/v1alpha1
 kind: RDMABandwidth
 metadata:
   name: rdma-bandwidth
@@ -174,7 +174,7 @@ Runs the RDMA latency benchmarks (i.e. `ib_{read,write}_lat`) from the
 > ```
 
 ```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
+apiVersion: perftest.nscale.com/v1alpha1
 kind: RDMALatency
 metadata:
   name: rdma-latency
@@ -277,14 +277,14 @@ For example, the following shows how to run an iperf test between every pair of 
 label `nscale.com/reserved: benchmarking` for a sweep of different numbers of streams:
 
 ```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
+apiVersion: perftest.nscale.com/v1alpha1
 kind: BenchmarkSet
 metadata:
   name: iperf
 spec:
   # The template for the fixed parts of the benchmark
   template:
-    apiVersion: perftest.stackhpc.com/v1alpha1
+    apiVersion: perftest.nscale.com/v1alpha1
     kind: IPerf
     spec:
       duration: 30
