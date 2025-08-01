@@ -3,84 +3,278 @@
 `kube-perftest` is a framework for building and running performance benchmarks for
 [Kubernetes](https://kubernetes.io/) clusters.
 
-- [Installation](#installation)
-- [Network selection](#network-selection)
-- [Benchmark set](#benchmark-set)
 - [Benchmarks](#benchmarks)
+  - [Common options](#common-options)
   - [iperf](#iperf)
-  - [MPI PingPong](#mpi-pingpong)
-  - [OpenFOAM](#openfoam)
   - [RDMA Bandwidth](#rdma-bandwidth)
   - [RDMA Latency](#rdma-latency)
-  - [fio](#fio)
-  - [PyTorch](#PyTorch)
-- [Operator development](#operator-development)
+- [Benchmark set](#benchmark-set)
 
-## Installation
+## Benchmarks
 
-Requires a volcano.sh installation on the cluster, can be installed using
+### Common options
 
-```sh
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
-```
-
-The `kube-perftest` operator can be installed using [Helm](https://helm.sh):
-
-```sh
-helm repo add kube-perftest https://stackhpc.github.io/kube-perftest
-# Use the most recent published chart for the main branch
-helm upgrade \
-  kube-perftest-operator \
-  kube-perftest/kube-perftest-operator \
-  -i \
-  --version ">=0.1.0-dev.0.main.0,<0.1.0-dev.0.main.99999999999"
-```
-
-For most use cases, no customisations to the Helm values will be necessary.
-
-## Network selection
-
-All the benchmarks are capable of running using the Kubernetes pod network or the host network
-(using `hostNetwork: true` on the benchmark pods).
-
-Benchmarks are also able to run on accelerated networks where available, using
-[Multus](https://github.com/k8snetworkplumbingwg/multus-cni) for multiple CNIs and
-[device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)
-to request network resources.
-
-This allows benchmarks to levarage technologies such as
-[SR-IOV](https://en.wikipedia.org/wiki/Single-root_input/output_virtualization)
-(via the [SR-IOV network device plugin](https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin)),
-[macvlan](https://backreference.org/2014/03/20/some-notes-on-macvlanmacvtap/) (via the
-[macvlan CNI plugin](https://www.cni.dev/plugins/current/main/macvlan/)) and
-[RDMA](https://en.wikipedia.org/wiki/Remote_direct_memory_access)
-(e.g. via the [RDMA shared device plugin](https://github.com/Mellanox/k8s-rdma-shared-dev-plugin)).
-
-The networking is configured using the following properties of the benchmark `spec`:
+The following options, all of which are optional, are supported for all benchmarks:
 
 ```yaml
 spec:
-  # Indicates whether to use host networking or not
-  # If true, networkName is not used
-  hostNetwork: false
-  # The name of a Multus network to use
-  # Only used if hostNetwork is false
-  # If not given, the Kubernetes pod network is used
-  networkName: namespace/netname
-  # The resources for benchmark pods
-  resources:
-    limits:
-      # E.g. requesting a share of an RDMA device
-      rdma/hca_shared_devices_a: 1
-  # The MTU to set on the interface *inside* the container
-  # If not given, the default MTU is used
-  mtu: 9000
+  # The image to use for the benchmark - each benchmark has a default image
+  image: registry.example.com/benchmark-image:dev
+  # The pull policy to use with the image - defaults to IfNotPresent
+  imagePullPolicy: Always
+  # Indicates whether the benchmark is paused - defaults to false
+  paused: true
+  # Indicates whether the benchmark should use host networking - defaults to false
+  hostNetwork: true
+  # Default metadata that should be applied to all objects produced by the benchmark
+  defaultMetadata:
+    labels:
+      example.org/label: labelvalue
+    annotations:
+      example.org/annotation: annotationvalue
+  # Metadata that should be applied only to the jobset
+  jobSet:
+    labels:
+      example.org/label: labelvalue
+    annotations:
+      example.org/annotation: annotationvalue
+  # Customisations for the pods that are part of the benchmark
+  pods:
+    # Metadata that should be applied only to the pods
+    labels:
+      example.org/label: labelvalue
+    annotations:
+      example.org/annotation: annotationvalue
+    # Node affinity for the pods
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - host1
+                  - host2
+    # Resources for the pods
+    resources:
+      requests:
+        nvidia.com/gpu: 1
+    # The node selector for the pods
+    nodeSelector:
+      nscale.com/reserved: benchmarking
+    # The tolerations for the pods
+    tolerations:
+      - key: nscale.com/reserved
+        operator: Equal
+        value: benchmarking
+```
+
+### iperf
+
+Runs the [iperf](https://en.wikipedia.org/wiki/Iperf) network performance tool to measure bandwidth
+for a transfer between two pods.
+
+```yaml
+apiVersion: perftest.stackhpc.com/v1alpha1
+kind: IPerf
+metadata:
+  name: iperf
+spec:
+  # The duration of the test
+  duration: 30
+  # The number of parallel streams to use
+  streams: 8
+  # Customisations for the iperf server and client pods
+  # Supports the same options as "pods" above
+  server:
+    ...
+  client:
+    ...
+```
+
+### RDMA Bandwidth
+
+Runs the RDMA bandwidth benchmarks (i.e. `ib_{read,write}_bw`) from the
+[perftest collection](https://github.com/linux-rdma/perftest).
+
+> [!NOTE]
+> This benchmark requires an RDMA-capable device to be specified for the pods,
+> which may require the pods to be placed on an RDMA-capable Multus network, e.g.:
+>
+> ```yaml
+> spec:
+>   pods:
+>     annotations:
+>       # Add the Multus network annotation if required
+>       k8s.v1.cni.cncf.io/networks: sriov-network
+>     resources:
+>       limits:
+>         # Specify an RDMA shared device
+>         rdma/hca_shared_device: 1
+>         # Or an SR-IOV device
+>         nvidia.com/mlnxnic: 1
+> ```
+
+```yaml
+apiVersion: perftest.stackhpc.com/v1alpha1
+kind: RDMABandwidth
+metadata:
+  name: rdma-bandwidth
+spec:
+  # The mode for the test - read or write - defaults to read
+  mode: read
+  # Indicates whether to use the RDMA connection manager - defaults to false
+  connectionManager: true
+  # The duration of the test - defaults to 30
+  duration: 30
+  # The message size for the test in bytes - defaults to 4194304 (4MB)
+  messageSize: 131072
+  # The number of queue pairs to use - defaults to 1
+  # A higher number of queue pairs can help to spread traffic,
+  # e.g. over NICs in a bond when using RoCE-LAG
+  qps: 1
+  # Customisations for the server pod
+  server:
+    # The name of the RDMA device to use - defaults to mlx5_0
+    device: mlx5_1
+    # The CPU affinity to use
+    # Any format accepted by taskset can be given
+    # https://man7.org/linux/man-pages/man1/taskset.1.html
+    # If not given, the local CPU list for the device is used
+    cpuAffinity: 0-15
+    # All the options from pods above are also supported
+    ...
+  # Customisations for the client pod
+  client:
+    # Supports the same options as server
+    ...
+```
+
+### RDMA Latency
+
+Runs the RDMA latency benchmarks (i.e. `ib_{read,write}_lat`) from the
+[perftest collection](https://github.com/linux-rdma/perftest).
+
+> [!NOTE]
+> This benchmark requires an RDMA-capable device to be specified for the pods,
+> which may require the pods to be placed on an RDMA-capable Multus network, e.g.:
+>
+> ```yaml
+> spec:
+>   pods:
+>     annotations:
+>       # Add the Multus network annotation if required
+>       k8s.v1.cni.cncf.io/networks: sriov-network
+>     resources:
+>       limits:
+>         # Specify an RDMA shared device
+>         rdma/hca_shared_device: 1
+>         # Or an SR-IOV device
+>         nvidia.com/mlnxnic: 1
+> ```
+
+```yaml
+apiVersion: perftest.stackhpc.com/v1alpha1
+kind: RDMALatency
+metadata:
+  name: rdma-latency
+spec:
+  # The mode for the test - read or write - defaults to read
+  mode: read
+  # Indicates whether to use the RDMA connection manager - defaults to false
+  connectionManager: true
+  # The duration of the test - defaults to 30
+  duration: 30
+  # The message size for the test in bytes - defaults to 2
+  messageSize: 2
+  # Customisations for the server pod
+  server:
+    # The name of the RDMA device to use - defaults to mlx5_0
+    device: mlx5_1
+    # The CPU affinity to use
+    # Any format accepted by taskset can be given
+    # https://man7.org/linux/man-pages/man1/taskset.1.html
+    # If not given, the local CPU list for the device is used
+    cpuAffinity: 0-15
+    # All the options from pods above are also supported
+    ...
+  # Customisations for the client pod
+  client:
+    # Supports the same options as server
+    ...
 ```
 
 ## Benchmark set
 
-The `kube-perftest` operator provides a `BenchmarkSet` resource that can be used to run
-the same benchmark over a sweep of parameters:
+`kube-perftest` provides a `BenchmarkSet` resource that can be used to run the same benchmark
+over a sweep of parameters.
+
+`.spec.template` is used to define the benchmarks that are produced, and supports a basic
+syntax for templating parameters defined in `.spec.matrix` into the benchmark definitions.
+
+`.spec.matrix` is used to define a matrix of different parameters, values from which can then
+be templated into the benchmark template.
+
+`.spec.matrix.product` is used to define parameter sweeps, with a benchmark being created for
+every possible combination of the parameters specified. Values are produced by generators, with
+the simplest possible generator being `valuesFrom` that just yields fixed values from a list.
+
+The following generators are currently available:
+
+```yaml
+# Produces values from a fixed list
+valuesFrom: [1, 2, 3, 4, 5]
+
+# Produces the names of Kubernetes nodes with an optional selector
+nodes:
+  selector:
+    matchLabels:
+      labelkey1: labelvalue1
+      labelkey2: labelvalue2
+
+# Produces all the possible combinations of the specified length that can be made from
+# the values produced by a source generator
+combinations:
+  # The length of combinations to produce
+  length: 2
+  # Whether to produce combinations with or without replacement (default false)
+  withReplacement: true
+  # The generator producing the values that combinations should be made from
+  source:
+    ...
+
+# Produces all the possible permutations of the specified length that can be made from
+# the values produced by a source generator
+permutations:
+  # The length of permutations to produce
+  length: 2
+  # Whether to produce permutations with or without replacement (default false)
+  withReplacement: true
+  # The generator producing the values that permutations should be made from
+  source:
+    ...
+
+# Samples a number of items randomly from a source generator
+sample:
+  # The size of the sample
+  size: 5
+  # The generator producing the values that should be sampled
+  source:
+    ...
+```
+
+> [!NOTE]
+>
+> The difference between combinations and permutations is subtle but important.
+>
+> Permutations are arrangements where order matters, i.e. `[A, B] != [B, A]`, whereas with
+> combinations the order _does not_ matter, i.e. `[A, B] == [B, A]`.
+
+`.spec.matrix.explicit` is used to define a list of specific parameter sets. Generators are not
+supported here.
+
+For example, the following shows how to run an iperf test between every pair of nodes with the
+label `nscale.com/reserved: benchmarking` for a sweep of different numbers of streams:
 
 ```yaml
 apiVersion: perftest.stackhpc.com/v1alpha1
@@ -94,253 +288,34 @@ spec:
     kind: IPerf
     spec:
       duration: 30
-  # The number of repetitions to run for each permutation
-  # Defaults to 1 if not given
-  repetitions: 1
-  # Defines the permutations for the set
-  # Each permutation is merged into the spec of the template
-  # If not given, a single permutation consisting of the given template is used
-  permutations:
-    # Permutations are calculated as a cross-product of the specified names and values
+      # Use the number of streams from the parameter set
+      streams: "{{ p.streams }}"
+      # Schedule the pods for the test on nodes from the generated pair
+      # The pods for an iperf test always have pod anti-affinity defined so that the server
+      # and client will be scheduled on different nodes
+      pods:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    # The toyaml filter means this will be interpreted as a two-item list
+                    values: "{{ p.nodes | toyaml }}"
+  matrix:
     product:
-      hostNetwork: [true, false]
-      streams: [1, 2, 4, 8, 16, 32, 64]
-    # A list of explicit permutations to include
-    explicit:
-      - hostNetwork: true
-        streams: 128
-```
-
-## Benchmarks
-
-Currently, the following benchmarks are supported:
-
-### iperf
-
-Runs the [iperf](https://en.wikipedia.org/wiki/Iperf) network performance tool to measure bandwidth
-for a transfer between two pods.
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: IPerf
-metadata:
-  name: iperf
-spec:
-  # The number of parallel streams to use
-  streams: 8
-  # The duration of the test
-  duration: 30
-```
-
-### MPI PingPong
-
-Runs the
-[Intel MPI Benchmarks (IMB) MPI1 PingPong](https://www.intel.com/content/www/us/en/develop/documentation/imb-user-guide/top/mpi-1-benchmarks/single-transfer-benchmarks/pingpong-pingpongspecificsource-pingponganysource.html)
-benchmark to measure the average round-trip time and bandwidth for MPI messages of different sizes
-between two pods.
-
-Uses [Open MPI](https://www.open-mpi.org/) initialised over SSH. The data plane can use TCP
-or, hardware and network permitting, [RDMA](https://en.wikipedia.org/wiki/Remote_direct_memory_access)
-via [UCX](https://openucx.org/).
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: MPIPingPong
-metadata:
-  name: mpi-pingpong
-spec:
-  # The MPI transport to use - one of TCP, RDMA
-  transport: TCP
-  # Controls the maximum message length
-  # Selected lengths, in bytes, will be 0, 1, 2, 4, 8, 16, ..., 2^maxlog
-  # Defaults to 22 if not given, meaning the maximum message size will be 4MB
-  maxlog: 22
-```
-
-### OpenFOAM
-
-[OpenFOAM](https://www.openfoam.com/) is a toolbox for solving problems in
-[computational fluid dynamics (CFD)](https://en.wikipedia.org/wiki/Computational_fluid_dynamics).
-It is included here as an example of a "real world" workload.
-
-This benchmark runs the
-[3-D Lid Driven cavity flow benchmark](https://develop.openfoam.com/committees/hpc#3-d-lid-driven-cavity-flow)
-from the OpenFOAM benchmark suite.
-
-Uses [Open MPI](https://www.open-mpi.org/) initialised over SSH. The data plane can use TCP
-or, hardware and network permitting, [RDMA](https://en.wikipedia.org/wiki/Remote_direct_memory_access)
-via [UCX](https://openucx.org/).
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: OpenFOAM
-metadata:
-  name: openfoam
-spec:
-  # The MPI transport to use - one of TCP, RDMA
-  transport: TCP
-  # The problem size to use - one of S, M, XL, XXL
-  problemSize: S
-  # The number of MPI processes to use
-  numProcs: 16
-  # The number of MPI pods to launch
-  numNodes: 8
-```
-
-### RDMA Bandwidth
-
-Runs the RDMA bandwidth benchmarks (i.e. `ib_{read,write}_bw`) from the
-[perftest collection](https://github.com/linux-rdma/perftest).
-
-This benchmark requires an RDMA-capable network to be specified.
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: RDMABandwidth
-metadata:
-  name: rdma-bandwidth
-spec:
-  # The mode for the test - read or write
-  mode: read
-  # The number of iterations to do at each message size
-  # Defaults to 1000 if not given
-  iterations: 1000
-  # The number of queue pairs to use
-  # Defaults to 1 if not given
-  # A higher number of queue pairs can help to spread traffic,
-  # e.g. over NICs in a bond when using RoCE-LAG
-  qps: 1
-  # Extra arguments to be added to the command
-  extraArgs:
-    - --tclass=96
-```
-
-### RDMA Latency
-
-Runs the RDMA latency benchmarks (i.e. `ib_{read,write}_lat`) from the
-[perftest collection](https://github.com/linux-rdma/perftest).
-
-This benchmark requires an RDMA-capable network to be specified.
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: RDMALatency
-metadata:
-  name: rdma-latency
-spec:
-  # The mode for the test - read or write
-  mode: read
-  # The number of iterations to do at each message size
-  # Defaults to 1000 if not given
-  iterations: 1000
-  # Extra arguments to be added to the command
-  extraArgs:
-    - --tclass=96
-```
-
-### fio
-
-Runs filesystem performance benchmarking using [fio](https://fio.readthedocs.io) to
-determine filesystem performance characteristics. All available `spec` options are
-given below. Fio configration options match broadly with those defined in the fio
-documentation.
-
-Setting `.spec.volumeClaimTemplate` allows the provision of stable storage using 
-`PersistentVolumes` provisioned by a [`PersistentVolume`](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
-Provisioner.
-
-When `spec.volumeClaimTemplate.accessModes` contains `ReadWriteMany`, this benchmark
-will create a single `PersistentVolume` per `BenchmarkSet` iteration, and attach all
-worker pods participting in the set (equal to `spec.numWorkers`) to the same volume.
-Otherwise, a `PersistentVolume` per-pod is created and attached to each worker pod
-participating in the benchmark.
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: Fio
-metadata:
-  name: fio-filesystem
-spec:
-  # fio benchmark configuration options
-  direct: 1
-  iodepth: 8
-  ioengine: libaio
-  nrfiles: 1
-  numJobs: 1
-  bs: 1M
-  rw: read
-  percentageRandom: 100
-  runtime: 10s
-  rwmixread: 50
-  size: 1G
-
-  # kube-perftest benchmark configuration
-  # options
-  numWorkers: 1
-  thread: false
-  hostNetwork: false
-
-  # PersistentVolume configuration options
-  volumeClaimTemplate:
-    accessModes:
-      - ReadWriteOnce
-    storageClassName: csi-cinder
-    resources:
-      requests:
-        storage: 5Gi
-```
-
-### PyTorch
-
-Runs machine learning model training and inference micro-benchmarks from the official 
-PyTorch [benchmarks repo](https://github.com/pytorch/benchmark/) to compare performance
-of CPU and GPU devices on synthetic input data. Running benchmarks on CUDA-capable
-devices requires the [Nvidia GPU Operator](https://github.com/NVIDIA/gpu-operator) 
-to be pre-installed on the target Kubernetes cluster.
-
-The pre-built container image currently includes the `alexnet`, `resnet50` and 
-`llama` (inference only) models - additional models from the 
-[upstream repo list](https://github.com/pytorch/benchmark/tree/main/torchbenchmark/models)
-may be added as needed in the future. (Adding a new model simply requires adding it to the list
-in `images/pytorch-benchmark/Dockerfile` and updating the `PyTorchModel` enum in `pytorch.py`.)
-
-```yaml
-apiVersion: perftest.stackhpc.com/v1alpha1
-kind: PyTorch
-metadata:
-  name: pytorch-test-gpu
-spec:
-  # The device to run the benchmark on ('cpu' or 'cuda')
-  device: cuda
-  # Name of model to benchmark
-  model: alexnet
-  # Either 'train' or 'eval'
-  # (not all models support both)
-  benchmarkType: eval
-  # Batch size for generated input data
-  inputBatchSize: 32
-  resources:
-    limits:
-      nvidia.com/gpu: 2
-```
-
-
-## Operator development
-
-```
-# Install dependencies in a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -U pip
-pip install -r python/requirements.txt
-pip install -e python
-
-# Set the default image tag
-export KUBE_PERFTEST__DEFAULT_IMAGE_TAG=<dev branch name>
-
-# Set the default image pull policy
-export KUBE_PERFTEST__DEFAULT_IMAGE_PULL_POLICY=Always
-
-# Run the operator
-kopf run -m perftest.operator -A
+      streams:
+        # valuesFrom generator that produces values from the specified list
+        valuesFrom: [1, 2, 4, 8, 16]
+      nodes:
+        # combinations generator that produces combinations of the specified length from
+        #   another generator
+        combinations:
+          length: 2
+          source:
+            # nodes generator that produces the names of nodes with the specified labels
+            nodes:
+              selector:
+                matchLabels:
+                  nscale.com/reserved: benchmarking
 ```

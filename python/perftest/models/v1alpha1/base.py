@@ -92,10 +92,6 @@ class BenchmarkSpec(schema.BaseModel):
         default_factory = PodCustomisation,
         description = "Customisations that apply to all the pods in the benchmark."
     )
-    suspend: bool = Field(
-        False,
-        description = "Indicates whether the benchmark is suspended."
-    )
 
 
 class BenchmarkPhase(str, schema.Enum):
