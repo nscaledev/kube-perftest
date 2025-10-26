@@ -176,7 +176,7 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
         # Ask the scheduling strategy to clean up any supporting resources
         await self._scheduling_strategy.cleanup(client, instance)
 
-    async def reconcile_normal(
+    async def reconcile_instance_normal(
         self,
         client: easykube.AsyncClient,
         instance: api.Benchmark,
@@ -249,7 +249,7 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
         instance = await self.save_instance_status(client, instance)
         return instance, easykube_runtime.Result()
 
-    async def reconcile_delete(
+    async def reconcile_instance_delete(
         self,
         client: easykube.AsyncClient,
         instance: api.Benchmark,

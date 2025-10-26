@@ -130,7 +130,7 @@ class BenchmarkSetReconciler(kcr_runtime.CustomResourceReconciler):
             }
             await client.apply_object(resource, force = True)
 
-    async def reconcile_normal(
+    async def reconcile_instance_normal(
         self,
         client: easykube.AsyncClient,
         instance: api.BenchmarkSet,
@@ -206,7 +206,7 @@ class BenchmarkSetReconciler(kcr_runtime.CustomResourceReconciler):
         instance = await self.save_instance_status(client, instance)
         return instance, easykube_runtime.Result()
 
-    async def reconcile_delete(
+    async def reconcile_instance_delete(
         self,
         client: easykube.AsyncClient,
         instance: api.BenchmarkSet,
