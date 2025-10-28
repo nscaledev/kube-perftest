@@ -28,8 +28,8 @@ class SchedulingStrategyConfig(Section):
     Configuration for the scheduling strategy.
     """
     #: The name of the scheduling strategy to use
-    #: Defaults to the built-in priorityclass strategy
-    name: constr(min_length = 1) = Field("priorityclass", validate_default = True)
+    #: Defaults to the built-in serial strategy
+    name: constr(min_length = 1) = Field("serial", validate_default = True)
     #: The configuration for the scheulding strategy
     config: t.Dict[str, t.Any] = Field(default_factory = dict, validate_default = True)
 

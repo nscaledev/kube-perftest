@@ -230,15 +230,23 @@ class BenchmarkReconciler(kcr_runtime.CustomResourceReconciler):
                 logger.info("Benchmark is paused - skipping benchmark resource creation")
             else:
                 logger.info("Creating benchmark resources")
-                # Store a reference to each resource so it can be deleted later
-                instance.status.managed_resources = [
-                    api.ResourceRef(
-                        api_version = resource["apiVersion"],
-                        kind = resource["kind"],
-                        name = resource["metadata"]["name"]
+                try:
+                    # Store a reference to each resource so it can be deleted later
+                    instance.status.managed_resources = [
+                        api.ResourceRef(
+                            api_version = resource["apiVersion"],
+                            kind = resource["kind"],
+                            name = resource["metadata"]["name"]
+                        )
+                        async for resource in self.ensure_benchmark_resources(client, instance)
+                    ]
+                except scheduling.SchedulingFailed as exc:
+                    # If scheduling failed, log the failure and retry with the specified duration
+                    logger.warning(f"Scheduling failed - {str(exc)}")
+                    return instance, easykube_runtime.Result(
+                        requeue = True,
+                        requeue_after = exc.retry_after
                     )
-                    async for resource in self.ensure_benchmark_resources(client, instance)
-                ]
                 # Save the resource references now, so we don't repeat this work later
                 instance = await self.save_instance_status(client, instance)
                 return instance, easykube_runtime.Result()

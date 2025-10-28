@@ -4,7 +4,7 @@ certifi==2025.10.5
 click==8.3.0
 configomatic==0.4.0
 git+https://github.com/mkjpryor/easykube.git@0055fad1efb9b1052398ccb174d8ec5162075c22#egg=easykube
-git+https://github.com/mkjpryor/easykube-runtime.git@c8ae5111ea647babf90fe9916a694c66468580f2#egg=easykube_runtime
+git+https://github.com/mkjpryor/easykube-runtime.git@5bcb5fd0e3be6bdaa716f6e0353ced0f80dd552c#egg=easykube_runtime
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1

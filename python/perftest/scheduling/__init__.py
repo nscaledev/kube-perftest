@@ -1,1 +1,1 @@
-from .base import SchedulingStrategy
+from .base import SchedulingStrategy, SchedulingFailed

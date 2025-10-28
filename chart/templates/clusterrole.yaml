@@ -40,6 +40,13 @@ rules:
       - jobsets
     verbs:
       - "*"
+  # For the priority class scheduling strategy
+  - apiGroups:
+      - scheduling.k8s.io
+    resources:
+      - priorityclasses
+    verbs:
+      - "*"
   # Reading pod info
   - apiGroups:
       - ""

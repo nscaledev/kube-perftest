@@ -10,6 +10,15 @@ if t.TYPE_CHECKING:
     from ..models import v1alpha1 as api
 
 
+class SchedulingFailed(Exception):
+    """
+    Exception raised when a scheduling strategy fails to apply.
+    """
+    def __init__(self, message: str, retry_after: t.Optional[int] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class SchedulingStrategy:
     """
     Base class for scheduling strategy plugins.
