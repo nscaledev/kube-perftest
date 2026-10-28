@@ -1,7 +1,7 @@
 annotated-types==0.7.0
 anyio==4.11.0
 certifi==2025.10.5
-click==8.3.0
+click==8.3.3
 configomatic==0.4.0
 git+https://github.com/mkjpryor/easykube.git@0055fad1efb9b1052398ccb174d8ec5162075c22#egg=easykube
 git+https://github.com/mkjpryor/easykube-runtime.git@5bcb5fd0e3be6bdaa716f6e0353ced0f80dd552c#egg=easykube_runtime
